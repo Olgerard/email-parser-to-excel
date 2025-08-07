@@ -2,6 +2,8 @@ import imaplib
 import email
 import os
 import tempfile
+from datetime import datetime
+
 from PyPDF2 import PdfReader
 from openai import OpenAI
 import json
@@ -10,6 +12,9 @@ from dotenv import load_dotenv
 import tkinter
 import customtkinter
 import threading
+from tkinter import filedialog
+
+from twisted.python import filepath
 
 load_dotenv()
 
@@ -174,7 +179,7 @@ def extracted_data_to_excel(ws, data):
         row += 1
     return row
 
-def write_json_to_excel(data, excel_path, sheet_name="Sheet1"):
+def write_json_to_excel(data, excel_path):
     data_without_duplicates = []
     i = 0
     while i < len(data):
@@ -204,7 +209,7 @@ def write_json_to_excel(data, excel_path, sheet_name="Sheet1"):
             refunds += [item]
 
     wb = load_workbook(excel_path)
-    ws = wb[sheet_name]
+    ws = wb.create_sheet(title=f"{datetime.now().strftime('%Y-%m-%d')}")
 
     row = ws.max_row + 1
     while any(ws.cell(row=row, column=col).value for col in range(1, 10)):
@@ -229,7 +234,7 @@ def write_json_to_excel(data, excel_path, sheet_name="Sheet1"):
     wb.save(excel_path)
     print(f"✅ Gegevens toegevoegd aan {excel_path}")
 
-def main(date, map):
+def main(date, map, excel):
     finish_label.configure(text="Bezig met mails lezen en in excel zetten!")
     progress_label.configure(text= "")
     email_list = email_to_text(date, map)
@@ -252,12 +257,21 @@ def main(date, map):
         number_of_handled_mails += 1
         progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
 
-    write_json_to_excel(json_items, "boekingen.xlsx")
+    write_json_to_excel(json_items, excel)
     finish_label.configure(text="Klaar!")
 
 def start_main_thread():
-    thread = threading.Thread(target=lambda: main(date.get(), map.get()))
+    thread = threading.Thread(target=lambda: main(date.get(), map.get(), excel_path.get()))
     thread.start()
+
+def browse_file():
+    filepath = filedialog.askopenfilename(
+        title="Selecteer Excel-bestand",
+        filetypes=[("Excel bestanden", "*.xlsx")],
+    )
+    if filepath:
+        excel_path.set(filepath)
+        file_label.configure(text=f"Geselecteerd: {os.path.basename(filepath)}", text_color="green")
 
 # System setting
 customtkinter.set_appearance_mode("System")
@@ -270,18 +284,26 @@ app.title("Excel assistent")
 
 # UI Elements
 date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail in (vb. 01-Aug-2025)")
-date_title.pack(padx=10, pady=10)
+date_title.pack(pady=(10,0))
 
 date = tkinter.StringVar()
 date_input = customtkinter.CTkEntry(app, width=100, height=40, textvariable=date)
-date_input.pack()
+date_input.pack(pady=(0,10))
 
 map_title = customtkinter.CTkLabel(app, text="Vul de naam van de map in (vb. NL)")
-map_title.pack(padx=10, pady=10)
+map_title.pack()
 
 map = tkinter.StringVar()
 map_input = customtkinter.CTkEntry(app, width=100, height=40, textvariable=map)
-map_input.pack()
+map_input.pack(pady=(0,10))
+
+excel_path = tkinter.StringVar()
+browse_btn = customtkinter.CTkButton(app, text="Kies Excel-bestand", command=browse_file)
+browse_btn.pack(pady=(10,0))
+
+file_label = customtkinter.CTkLabel(app, text="Geen bestand geselecteerd", text_color="red")
+file_label.pack()
+
 
 finish_label = customtkinter.CTkLabel(app, text = "")
 finish_label.pack()
@@ -290,7 +312,7 @@ progress_label = customtkinter.CTkLabel(app, text = "")
 progress_label.pack()
 
 run_btn = customtkinter.CTkButton(app, text="Start", command=start_main_thread)
-run_btn.pack(pady = 10)
+run_btn.pack()
 
 # Run app
 app.mainloop()
