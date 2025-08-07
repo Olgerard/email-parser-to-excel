@@ -7,6 +7,9 @@ from openai import OpenAI
 import json
 from openpyxl import load_workbook
 from dotenv import load_dotenv
+import tkinter
+import customtkinter
+import threading
 
 load_dotenv()
 
@@ -19,11 +22,16 @@ def clean(text):
     # clean text for creating a folder
     return "".join(c if c.isalnum() else "_" for c in text)
 
-def email_to_text(date):
+def email_to_text(date, map):
+    map = '"' + map + '"'
     mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
     mail.login(usr, pwd)
-    mail.select('"PS Test"')
-    typ, data = mail.search(None, "SINCE", date)
+    mail.select(map)
+    try:
+        typ, data = mail.search(None, "SINCE", date)
+    except:
+        print("Wrong date format")
+        finish_label.configure(text="Ongeldige datum of map", text_color="red")
     extracted_mails = []
     for i in sorted(data[0].split(), key = int, reverse=True):
         complete_mail = ""
@@ -167,11 +175,24 @@ def extracted_data_to_excel(ws, data):
     return row
 
 def write_json_to_excel(data, excel_path, sheet_name="Sheet1"):
+    data_without_duplicates = []
+    i = 0
+    while i < len(data):
+        j = 0
+        duplicate = False
+        while j < i:
+            if data[i] == data[j]:
+                duplicate = True
+            j += 1
+        if not duplicate:
+            data_without_duplicates += [data[i]]
+        i += 1
+
     flights = []
     trains = []
     hotels = []
     refunds = []
-    for item in data:
+    for item in data_without_duplicates:
         ticket_type = item.get("type", "")
         if ticket_type == "vlucht":
             flights += [item]
@@ -189,36 +210,88 @@ def write_json_to_excel(data, excel_path, sheet_name="Sheet1"):
     while any(ws.cell(row=row, column=col).value for col in range(1, 10)):
         row += 1
 
-    ws.cell(row=row, column=1).value = "Vluchten"
-    row = extracted_data_to_excel(ws, flights)
+    if len(flights) != 0:
+        ws.cell(row=row, column=1).value = "Vluchten"
+        row = extracted_data_to_excel(ws, flights)
 
-    ws.cell(row=row + 1, column=1).value = "Trein/bus"
-    row = extracted_data_to_excel(ws, trains)
+    if len(trains) != 0:
+        ws.cell(row=row + 1, column=1).value = "Trein/bus"
+        row = extracted_data_to_excel(ws, trains)
 
-    ws.cell(row=row + 1, column=1).value = "Hotels"
-    row = extracted_data_to_excel(ws, hotels)
+    if len(hotels) != 0:
+        ws.cell(row=row + 1, column=1).value = "Hotels"
+        row = extracted_data_to_excel(ws, hotels)
 
-    ws.cell(row=row + 1, column=1).value = "Refunds"
-    extracted_data_to_excel(ws, refunds)
+    if len(refunds) != 0:
+        ws.cell(row=row + 1, column=1).value = "Refunds"
+        extracted_data_to_excel(ws, refunds)
 
     wb.save(excel_path)
     print(f"✅ Gegevens toegevoegd aan {excel_path}")
 
+def main(date, map):
+    finish_label.configure(text="Bezig met mails lezen en in excel zetten!")
+    progress_label.configure(text= "")
+    email_list = email_to_text(date, map)
+    email_full_text = ""
+    json_items = []
+    number_of_mails = len(email_list)
+    number_of_handled_mails = 0
+    progress_label.configure(text="0 van de " + str(number_of_mails) + " uitgelezen")
+    for m in email_list:
+        email_full_text += m
+        json_string = extract_flight_data(m)
+        try:
+            item = json.loads(json_string)
+        except json.JSONDecodeError as e:
+            finish_label.configure(text="AI geeft onleesbare vorm terug", text_color="red")
+            print("JSON kon niet gelezen worden:", e)
+            print(json_string)
+            quit()
+        json_items += item
+        number_of_handled_mails += 1
+        progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
 
+    write_json_to_excel(json_items, "boekingen.xlsx")
+    finish_label.configure(text="Klaar!")
 
-email_list = email_to_text("01-Aug-2025")
+def start_main_thread():
+    thread = threading.Thread(target=lambda: main(date.get(), map.get()))
+    thread.start()
 
-email_full_text = ""
-json_items = []
-for m in email_list:
-    email_full_text += m
-    json_string = extract_flight_data(m)
-    try:
-        item = json.loads(json_string)
-    except json.JSONDecodeError as e:
-        print("JSON kon niet gelezen worden:", e)
-        print(json_string)
-        quit()
-    json_items += item
+# System setting
+customtkinter.set_appearance_mode("System")
+customtkinter.set_default_color_theme("blue")
 
-write_json_to_excel(json_items, "boekingen.xlsx")
+# App frame
+app = customtkinter.CTk()
+app.geometry("720x480")
+app.title("Excel assistent")
+
+# UI Elements
+date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail in (vb. 01-Aug-2025)")
+date_title.pack(padx=10, pady=10)
+
+date = tkinter.StringVar()
+date_input = customtkinter.CTkEntry(app, width=100, height=40, textvariable=date)
+date_input.pack()
+
+map_title = customtkinter.CTkLabel(app, text="Vul de naam van de map in (vb. NL)")
+map_title.pack(padx=10, pady=10)
+
+map = tkinter.StringVar()
+map_input = customtkinter.CTkEntry(app, width=100, height=40, textvariable=map)
+map_input.pack()
+
+finish_label = customtkinter.CTkLabel(app, text = "")
+finish_label.pack()
+
+progress_label = customtkinter.CTkLabel(app, text = "")
+progress_label.pack()
+
+run_btn = customtkinter.CTkButton(app, text="Start", command=start_main_thread)
+run_btn.pack(pady = 10)
+
+# Run app
+app.mainloop()
+
