@@ -2,6 +2,9 @@ import imaplib
 import email
 import os
 import tempfile
+
+from bokeh.util.terminal import white
+from openpyxl.styles import Font, PatternFill
 from datetime import datetime
 from PyPDF2 import PdfReader
 from openai import OpenAI
@@ -208,31 +211,47 @@ def write_json_to_excel(data, excel_path):
     wb = load_workbook(excel_path)
     ws = wb.create_sheet(title=f"{datetime.now().strftime('%Y-%m-%d')}")
 
-    row = ws.max_row + 1
-    while any(ws.cell(row=row, column=col).value for col in range(1, 10)):
-        row += 1
+    ws.cell(row=1, column=1).value = "Boekingsdatum"
+    ws.cell(row=1, column=2).value = "Datum"
+    ws.cell(row=1, column=3).value = "Tour"
+    ws.cell(row=1, column=4).value = "Passagier"
+    ws.cell(row=1, column=5).value = "Bestemming"
+    ws.cell(row=1, column=6).value = "Prijs"
+    ws.cell(row=1, column=7).value = "Prijs Excel"
+    ws.cell(row=1, column=8).value = "PNR"
+    ws.cell(row=1, column=9).value = "Airline"
 
+    row = 2
+    highlight = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     if len(flights) != 0:
         ws.cell(row=row, column=1).value = "Vluchten"
+        ws.cell(row=row, column=1).fill = highlight
+        ws.cell(row=row, column=1).font = Font(bold=True)
         row = extracted_data_to_excel(ws, flights)
 
     if len(trains) != 0:
         ws.cell(row=row + 1, column=1).value = "Trein/bus"
+        ws.cell(row=row + 1, column=1).fill = highlight
+        ws.cell(row=row + 1, column=1).font = Font(bold=True)
         row = extracted_data_to_excel(ws, trains)
 
     if len(hotels) != 0:
         ws.cell(row=row + 1, column=1).value = "Hotels"
+        ws.cell(row=row + 1, column=1).fill = highlight
+        ws.cell(row=row + 1, column=1).font = Font(bold=True)
         row = extracted_data_to_excel(ws, hotels)
 
     if len(refunds) != 0:
         ws.cell(row=row + 1, column=1).value = "Refunds"
+        ws.cell(row=row + 1, column=1).fill = highlight
+        ws.cell(row=row + 1, column=1).font = Font(bold=True)
         extracted_data_to_excel(ws, refunds)
 
     wb.save(excel_path)
     print(f"✅ Gegevens toegevoegd aan {excel_path}")
 
 def main(mail, date, map, excel):
-    finish_label.configure(text="Bezig met mails lezen en in excel zetten!")
+    finish_label.configure(text="Bezig met mails lezen en in Excel zetten!", text_color="white")
     progress_label.configure(text= "")
     email_list = email_to_text(mail, date, map)
     email_full_text = ""
@@ -255,7 +274,7 @@ def main(mail, date, map, excel):
         progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
 
     write_json_to_excel(json_items, excel)
-    finish_label.configure(text="Klaar!")
+    finish_label.configure(text="Klaar! Selecteer een andere map of sluit het programma.")
 
 def start_main_thread():
     thread = threading.Thread(target=lambda: main(mail, date.get(), map.get(), excel_path.get()))
@@ -269,6 +288,7 @@ def browse_file():
     if filepath:
         excel_path.set(filepath)
         file_label.configure(text=f"Geselecteerd: {os.path.basename(filepath)}", text_color="green")
+        run_btn.configure(state=tkinter.NORMAL)
 
 
 mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
@@ -307,7 +327,7 @@ map_title.pack()
 
 map = tkinter.StringVar()
 cb = ttk.Combobox(app, values=mailbox_names, textvariable=map, width=50, height=40)
-cb.configure(font=tkFont.Font(size=14))
+cb.configure(font=tkFont.Font(size=14) )
 cb.pack(pady=(0,10))
 
 excel_path = tkinter.StringVar()
@@ -326,6 +346,7 @@ progress_label.pack()
 
 run_btn = customtkinter.CTkButton(app, text="Start", command=start_main_thread)
 run_btn.pack()
+run_btn.configure(state=tkinter.DISABLED)
 
 # Run app
 app.mainloop()
