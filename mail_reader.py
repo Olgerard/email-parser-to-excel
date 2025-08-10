@@ -2,8 +2,6 @@ import imaplib
 import email
 import os
 import tempfile
-
-from bokeh.util.terminal import white
 from openpyxl.styles import Font, PatternFill
 from datetime import datetime
 from PyPDF2 import PdfReader
@@ -17,6 +15,7 @@ import threading
 from tkinter import filedialog
 from tkinter import ttk
 import tkinter.font as tkFont
+from tkcalendar import DateEntry
 
 load_dotenv()
 
@@ -24,6 +23,10 @@ usr = os.getenv("EMAIL_USER")
 pwd = os.getenv("EMAIL_PASS")
 
 client = OpenAI(api_key=os.getenv("openai_api_key"))
+
+if not usr or not pwd or not client:
+    print("❌ Vul eerst je .env bestand in!")
+    quit()
 
 def clean(text):
     # clean text for creating a folder
@@ -179,7 +182,7 @@ def extracted_data_to_excel(ws, data):
         row += 1
     return row
 
-def write_json_to_excel(data, excel_path):
+def write_json_to_excel(data, excel_path, map):
     data_without_duplicates = []
     i = 0
     while i < len(data):
@@ -209,7 +212,7 @@ def write_json_to_excel(data, excel_path):
             refunds += [item]
 
     wb = load_workbook(excel_path)
-    ws = wb.create_sheet(title=f"{datetime.now().strftime('%Y-%m-%d')}")
+    ws = wb.create_sheet(title=f"{map} - {datetime.now().strftime('%Y-%m-%d')}")
 
     ws.cell(row=1, column=1).value = "Boekingsdatum"
     ws.cell(row=1, column=2).value = "Datum"
@@ -254,13 +257,11 @@ def main(mail, date, map, excel):
     finish_label.configure(text="Bezig met mails lezen en in Excel zetten!", text_color="white")
     progress_label.configure(text= "")
     email_list = email_to_text(mail, date, map)
-    email_full_text = ""
     json_items = []
     number_of_mails = len(email_list)
     number_of_handled_mails = 0
     progress_label.configure(text="0 van de " + str(number_of_mails) + " uitgelezen")
     for m in email_list:
-        email_full_text += m
         json_string = extract_flight_data(m)
         try:
             item = json.loads(json_string)
@@ -273,11 +274,11 @@ def main(mail, date, map, excel):
         number_of_handled_mails += 1
         progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
 
-    write_json_to_excel(json_items, excel)
+    write_json_to_excel(json_items, excel, map)
     finish_label.configure(text="Klaar! Selecteer een andere map of sluit het programma.")
 
 def start_main_thread():
-    thread = threading.Thread(target=lambda: main(mail, date.get(), map.get(), excel_path.get()))
+    thread = threading.Thread(target=lambda: main(mail, date_entry.get_date().strftime("%d-%b-%Y"), map.get(), excel_path.get()))
     thread.start()
 
 def browse_file():
@@ -319,24 +320,28 @@ date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail i
 date_title.pack(pady=(10,0))
 
 date = tkinter.StringVar()
-date_input = customtkinter.CTkEntry(app, width=100, height=40, textvariable=date)
-date_input.pack(pady=(0,10))
+date_entry = DateEntry(app, date_pattern='dd/mm/yyyy')
+date_entry.configure(font=tkFont.Font(size=14))
+date_entry.pack(padx=10, pady=(10,20))
 
 map_title = customtkinter.CTkLabel(app, text="Vul de naam van de map in (vb. NL)")
 map_title.pack()
 
 map = tkinter.StringVar()
-cb = ttk.Combobox(app, values=mailbox_names, textvariable=map, width=50, height=40)
+cb = ttk.Combobox(app, values=mailbox_names, textvariable=map, width=25, height=40)
 cb.configure(font=tkFont.Font(size=14) )
 cb.pack(pady=(0,10))
 
 excel_path = tkinter.StringVar()
 browse_btn = customtkinter.CTkButton(app, text="Kies Excel-bestand", command=browse_file)
-browse_btn.pack(pady=(10,0))
+browse_btn.pack(pady=(20,0))
 
 file_label = customtkinter.CTkLabel(app, text="Geen bestand geselecteerd", text_color="red")
 file_label.pack()
 
+run_btn = customtkinter.CTkButton(app, text="Start", command=start_main_thread)
+run_btn.pack(pady=(20,10))
+run_btn.configure(state=tkinter.DISABLED)
 
 finish_label = customtkinter.CTkLabel(app, text = "")
 finish_label.pack()
@@ -344,9 +349,6 @@ finish_label.pack()
 progress_label = customtkinter.CTkLabel(app, text = "")
 progress_label.pack()
 
-run_btn = customtkinter.CTkButton(app, text="Start", command=start_main_thread)
-run_btn.pack()
-run_btn.configure(state=tkinter.DISABLED)
 
 # Run app
 app.mainloop()
