@@ -5,7 +5,7 @@ import tempfile
 from openpyxl.styles import Font, PatternFill
 from datetime import datetime
 from PyPDF2 import PdfReader
-from openai import OpenAI
+from anthropic import Anthropic
 import json
 from openpyxl import load_workbook
 from dotenv import load_dotenv
@@ -25,7 +25,7 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("openai_api_key"))
+client = Anthropic(api_key=os.getenv("claude_api_key"))
 
 if not client:
     print("❌ Vul eerst je .env bestand in!")
@@ -85,10 +85,11 @@ def email_to_text_gmail(service, date, label):
     return extracted_mails
 
 def extract_flight_data(email_text):
-    response = client.chat.completions.create(
-        model="gpt-4-turbo",
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=20000,
+        temperature=1,
         messages=[
-            {"role": "system", "content": "Je bent een behulpzame assistent die e-mails omzet in gestructureerde JSON data."},
             {"role": "user", "content": f"""
 Je bent een slimme data-extractie assistent voor een reisagent. Je krijgt telkens een email en mogelijke de toegevoegde bijlagen, de bijlagen start altijd met 'Text from PDF:'.
 Haal uit de mail de vluchtdetails en geef ze als JSON terug in dit formaat:
@@ -133,7 +134,7 @@ Deze vorm voor refunds:
 De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums en getallen
 Als er meerdere namen op het ticket staan moet elke passagier een eigen object zijn met alle info, maar enkel bij de eerste passagier mag de totale prijs staan en bij de andere moet de prijs leeg zijn.
 Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar de prijs mag enkel ingevuld zijn bij de heenvlucht.
-Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten.
+Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan eerst voor alle namen de eerste vlucht en dan voor alle namen de andere vlucht.
 Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' '#aantal kamers' x.
 Wanneer er een overstap gemaakt wordt hoeft dit niet vermeld te worden, dus bijvoorbeeld Amsterdam - Warschau en Warschau - Wroclaw op dezelfde datum wordt Amsterdam - Wroclaw.
 Een transfer hoort bij trein/ bus.
@@ -148,27 +149,41 @@ Brussels Charleroi = Charleroi
 Bij refunds van KLM ga je enkel het boekingsnummer, boekingsdatum (datum van mail) en misschien de naam terugvinden, laat de rest dus gewoon open
 EXTREEM BELANGRIJK: IK WIL BIJ DE PRIJS NOOIT EUR ZIEN STAAN, EEN PRIJS IN EURO IS GEWOON EEN GETAL. EEN ANDERE VALUTA DAN EUR MOET WEL VERMELD WORDEN (VB/ 179.99 PLN).
 EXTREEM BELANGRIJK: IK WIL NOOIT ERGENS N/A ZIEN STAAN, DIT MOET HANDMATIG VERWIJDERD WORDEN EN HET VAKJE KAN DUS BETER ONMIDDELIJK OPENGELATEN WORDEN.
-EXTREEM BELANGRIJK: Geef alleen geldige JSON terug, zonder enige toelichting of tekst errond zoals ```json. Als iets niet in JSON staat krijg ik een error in mijn code.
+EXTREEM BELANGRIJK: Geef alleen geldige JSON terug, zonder enige toelichting of tekst errond zoals ```json. Je respons moet dus exact in de vorm van de voorbeelden staan en mag hier absoluut niet van afwijken.
 EMAIL:
 \"\"\"
 {email_text}
 \"\"\"
 """}
-        ],
-        temperature=0.0
+        ]
     )
-    return response.choices[0].message.content
+    return response.content[0].text
 
 def extracted_data_to_excel(ws, data):
     row = ws.max_row + 1
     for item in data:
-        ws.cell(row=row, column=1).value = item.get("boekingsdatum", "")
-        ws.cell(row=row, column=2).value = item.get("datum", "")
+        try:
+            date_obj = datetime.strptime(item["boekingsdatum"], "%m/%d/%Y").date()
+            cell = ws.cell(row=row, column=1, value=date_obj)
+            cell.number_format = "MM/DD/YYYY"
+        except ValueError:
+            ws.cell(row=row, column=1).value = item.get("boekingsdatum", "")
+        try:
+            date_obj = datetime.strptime(item["datum"], "%m/%d/%Y").date()
+            cell = ws.cell(row=row, column=2, value=date_obj)
+            cell.number_format = "MM/DD/YYYY"
+        except ValueError:
+            ws.cell(row=row, column=2).value = item.get("datum", "")
         ws.cell(row=row, column=3).value = ""
         ws.cell(row=row, column=4).value = item.get("passagier", "")
         ws.cell(row=row, column=5).value = item.get("bestemming", "")
         ws.cell(row=row, column=6).value = ""
-        ws.cell(row=row, column=7).value = item.get("prijs", "")
+        try:
+            price = float(item["prijs"])
+            cell = ws.cell(row=row, column=7, value=price)
+            cell.number_format = "#,##0.00"
+        except ValueError:
+            ws.cell(row=row, column=7).value = item.get("prijs", "")
         ws.cell(row=row, column=8).value = item.get("PNR", "")
         ws.cell(row=row, column=9).value = item.get("airline", "")
         row += 1
