@@ -1,6 +1,6 @@
-import imaplib
-import email
+import base64
 import os
+import sys
 import tempfile
 from openpyxl.styles import Font, PatternFill
 from datetime import datetime
@@ -16,100 +16,89 @@ from tkinter import filedialog
 from tkinter import ttk
 import tkinter.font as tkFont
 from tkcalendar import DateEntry
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 load_dotenv()
 
-usr = os.getenv("EMAIL_USER")
-pwd = os.getenv("EMAIL_PASS")
-
 client = OpenAI(api_key=os.getenv("openai_api_key"))
 
-if not usr or not pwd or not client:
+if not client:
     print("❌ Vul eerst je .env bestand in!")
     quit()
 
-def clean(text):
-    # clean text for creating a folder
-    return "".join(c if c.isalnum() else "_" for c in text)
+def email_to_text_gmail(service, date, label):
+    query = f'after:{datetime.strptime(date, "%d-%b-%Y").strftime("%Y/%m/%d")}'
+    if label:
+        all_labels = service.users().labels().list(userId='me').execute().get('labels', [])
+        label_id = next((l['id'] for l in all_labels if l['name'] == label), None)
+    else:
+        label_id = None
+        finish_label.configure(text="Geen map ingevuld!", text_color="red")
+        quit()
 
-def email_to_text(mail, date, map):
-    map = '"' + map + '"'
-    mail.select(map)
-    try:
-        typ, data = mail.search(None, "SINCE", date)
-    except:
-        print("Wrong date format")
-        finish_label.configure(text="Ongeldige datum of map", text_color="red")
+    results = service.users().messages().list(
+        userId='me',
+        q=query,
+        labelIds=[label_id] if label_id else None
+    ).execute()
+
+    messages = results.get('messages', [])
+    messages.reverse()
     extracted_mails = []
-    for i in sorted(data[0].split(), key = int, reverse=True):
+
+    for msg in messages:
+        m = service.users().messages().get(userId='me', id=msg['id']).execute()
+        payload = m['payload']
+        parts = payload.get('parts', [])
         complete_mail = ""
-        res, msg = mail.fetch(i, "(RFC822)")
-        for response in msg:
-            if isinstance(response, tuple):
-                # parse a bytes email into a message object
-                msg = email.message_from_bytes(response[1])
-                if msg.is_multipart():
-                    # iterate over email parts
-                    for part in msg.walk():
-                        # extract content type of email
-                        content_type = part.get_content_type()
-                        content_disposition = str(part.get("Content-Disposition"))
+
+        def walk_parts(parts_list):
+            nonlocal complete_mail
+            for part in parts_list:
+                mime_type = part.get('mimeType', '')
+                body_data = part.get('body', {}).get('data')
+                if body_data:
+                    decoded = base64.urlsafe_b64decode(body_data).decode(errors="ignore")
+                    if mime_type == 'text/plain':
+                        complete_mail += decoded
+                    elif mime_type == 'application/pdf':
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                            tmp_file.write(base64.urlsafe_b64decode(body_data))
+                            tmp_filepath = tmp_file.name
                         try:
-                            # get the email body
-                            body = part.get_payload(decode=True).decode()
-                        except:
-                            pass
-                        if content_type == "text/plain" and "attachment" not in content_disposition:
-                            # print text/plain emails and skip attachments
-                            complete_mail += body
-                        elif "attachment" in content_disposition:
-                            # download attachment
-                            filename = part.get_filename()
-                            if filename and filename.lower().endswith(".pdf"):
-                                # only handle if file is PDF
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                                    tmp_file.write(part.get_payload(decode=True))
-                                    tmp_filepath = tmp_file.name
+                            reader = PdfReader(tmp_filepath)
+                            pdf_text = "\n".join([page.extract_text() for page in reader.pages])
+                            complete_mail += "Text from PDF:" + pdf_text
+                        finally:
+                            os.remove(tmp_filepath)
+                if 'parts' in part:
+                    walk_parts(part['parts'])
 
-                                try:
-                                    reader = PdfReader(tmp_filepath)
-                                    pdf_text = "\n".join([page.extract_text() for page in reader.pages])
-                                    complete_mail += "Text from PDF:"
-                                    complete_mail += pdf_text
-                                except Exception as e:
-                                    print(f"Error while reading PDF {filename}: {e}")
-                                finally:
-                                    os.remove(tmp_filepath)
-                else:
-                    # extract content type of email
-                    content_type = msg.get_content_type()
-                    # get the email body
-                    body = msg.get_payload(decode=True).decode()
-                    if content_type == "text/plain":
-                        # print only text email parts
-                        complete_mail += body
-        extracted_mails += [complete_mail]
+        walk_parts(parts)
+        extracted_mails.append(complete_mail)
 
-    # close the connection and logout
-    mail.close()
-    mail.logout()
     return extracted_mails
 
 def extract_flight_data(email_text):
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4-turbo",
         messages=[
-            {"role": "system", "content": "Je bent een behulpzame assistent die e-mails omzet in gestructureerde data."},
+            {"role": "system", "content": "Je bent een behulpzame assistent die e-mails omzet in gestructureerde JSON data."},
             {"role": "user", "content": f"""
 Je bent een slimme data-extractie assistent voor een reisagent. Je krijgt telkens een email en mogelijke de toegevoegde bijlagen, de bijlagen start altijd met 'Text from PDF:'.
-Haal uit de mail de vluchtdetails en geef ze als JSON terug in dit formaat voor vluvhten, treinen, bussen en transfers:
+Haal uit de mail de vluchtdetails en geef ze als JSON terug in dit formaat:
 [
     {{
         "type": "Opties tussen: vlucht of trein/bus",
-        "boekingsdatum": "De datum waarop de boeking vastgelegd is (de dag van betaling of meestal waarop de mail gestuurd is) (mm/dd/jjjj)",
+        "boekingsdatum": In 95% van de gevallen de datum waarop de mail gestuurd is (mm/dd/jjjj)",
         "datum": "De datum van de reis (mm/dd/jjjj)",
         "passagier": "Volledige naam",
-        "bestemming": "Van - Naar",
+        "bestemming": "Stad van vertrek - Stad van aankomst",
         "prijs": "De totale eindprijs op het ticket, staat meestal achter total amount of paid by card of iets gelijkaardigs (vb 123.45)",
         "PNR": "De boekingscode van op het ticket",
         "airline": "De naam van de maatschappij waarbij het ticket geboekt is"
@@ -119,7 +108,7 @@ Deze vorm voor hotels:
 [
     {{
         "type": "hotel",
-        "boekingsdatum": "De datum waarop de boeking vastgelegd is (de dag van betaling, meestal de dag waarop de mail gestuurd is) (mm/dd/jjjj)",
+        "boekingsdatum": "In 95% van de gevallen de datum waarop de mail gestuurd is (mm/dd/jjjj) (mm/dd/jjjj)",
         "datum": "Incheck datum (mm/dd/jjjj)",
         "passagier": "Volledige naam",
         "bestemming": "Naam hotel, Stad",
@@ -132,30 +121,34 @@ Deze vorm voor refunds:
 [
     {{
         "type": "refund",
-        "boekingsdatum": "De datum waarop de boeking vastgelegd is (de dag van betaling of meestal waarop de mail gestuurd is) (mm/dd/jjjj)",
+        "boekingsdatum": "In 95% van de gevallen de datum waarop de mail gestuurd is (mm/dd/jjjj) (mm/dd/jjjj)",
         "datum": "Incheck datum (mm/dd/jjjj)",
         "passagier": "Volledige naam",
         "bestemming": "Naam hotel, Stad",
-        "prijs": "De totale eindprijs op het ticket, staat meestal achter total amount of paid by card of iets gelijkaardigs (vb 123.45)",
+        "prijs": "De totale eindprijs op het ticket met een minteken (vb -123.45)",
         "PNR": "De boekingscode van op het ticket",
         "airline": "De naam van de maatschappij waarbij het ticket geboekt is"
     }},
 ]
-Antwoord enkel met geldige JSON. Geen commentaar, geen uitleg, geen codeblok-tekens.
+De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums en getallen
 Als er meerdere namen op het ticket staan moet elke passagier een eigen object zijn met alle info, maar enkel bij de eerste passagier mag de totale prijs staan en bij de andere moet de prijs leeg zijn.
-Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' '#aantal kamers' x
 Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar de prijs mag enkel ingevuld zijn bij de heenvlucht.
+Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten.
+Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' '#aantal kamers' x.
 Wanneer er een overstap gemaakt wordt hoeft dit niet vermeld te worden, dus bijvoorbeeld Amsterdam - Warschau en Warschau - Wroclaw op dezelfde datum wordt Amsterdam - Wroclaw.
-Een transfer hoort bij trein/ bus
-Als er Mr of iets gelijkaardigs in de naam zit staat dit voor meneer en moet je dit niet mee in de naam zetten
-Plaatsnamen moeten in het nederlands en altijd voluit
-Wees consisten in de namen bijvoorbeeld: LOT of LOT airlines is altijd LOT, KLM airlines is gewoon KLM
-Namen van passagiers beginnen met een hoofdletter, maar mogen nooit in drukletters
-Namen van maatschappijen altijd met hoofdletter
-Sommige mails bevatten ook pdf's, deze zijn meegeplakt in de tekst van de mail en het kan zijn dat info van een vlucht dubbel is. Zorg dus dat je nooit twee objecten waarbij naam, bestemmnig, datum en boekingsnummer bij alle twee hetzelfde zijn.
-EXTREEM BELANGRIJK: IK WIL BIJ DE PRIJS NOOIT EUR ZIEN STAAN, EEN PRIJS IN EURO IS GEWOON EEN GETAL. EEN ANDERE VALUTA DAN EUR MOET WEL VERMELD WORDEN (VB/ 179.99 PLN)
-EXTREEM BELANGRIJK: IK WIL NOOIT ERGENS N/A ZIEN STAAN, DIT MOET HANDMATIG VERWIJDERD WORDEN EN HET VAKJE KAN DUS BETER ONMIDDELIJK OPENGELATEN WORDEN
-
+Een transfer hoort bij trein/ bus.
+Als er mr of iets gelijkaardigs in de naam zit staat dit voor meneer en moet je dit niet mee in de naam zetten.
+Plaatsnamen moeten altijd in het Nederlands (als het op het ticket niet het geval is moet je zelf vertalen) en altijd voluit. Enkel de naam van de stad is nodig de naam van de luchthaven hoeft niet.
+Wees consisten in de namen bijvoorbeeld: LOT of LOT airlines is altijd LOT, KLM airlines is gewoon KLM, Expedia en niet Expedia TAAP, NMBS, TAP Air Portugal is TAP... .
+Namen van passagiers beginnen met een hoofdletter, maar mogen nooit in drukletters.
+Namen van maatschappijen altijd met hoofdletter.
+Er kan nooit een negatief bedrag zijn wanneer het type niet refund is.
+Bij LOT staan de namen in deze vorm: NAAM VOORNAAM Mr let er op dat je dit omdraait om consistent met de rest te blijven.
+Brussels Charleroi = Charleroi
+Bij refunds van KLM ga je enkel het boekingsnummer, boekingsdatum (datum van mail) en misschien de naam terugvinden, laat de rest dus gewoon open
+EXTREEM BELANGRIJK: IK WIL BIJ DE PRIJS NOOIT EUR ZIEN STAAN, EEN PRIJS IN EURO IS GEWOON EEN GETAL. EEN ANDERE VALUTA DAN EUR MOET WEL VERMELD WORDEN (VB/ 179.99 PLN).
+EXTREEM BELANGRIJK: IK WIL NOOIT ERGENS N/A ZIEN STAAN, DIT MOET HANDMATIG VERWIJDERD WORDEN EN HET VAKJE KAN DUS BETER ONMIDDELIJK OPENGELATEN WORDEN.
+EXTREEM BELANGRIJK: Geef alleen geldige JSON terug, zonder enige toelichting of tekst errond zoals ```json. Als iets niet in JSON staat krijg ik een error in mijn code.
 EMAIL:
 \"\"\"
 {email_text}
@@ -164,7 +157,6 @@ EMAIL:
         ],
         temperature=0.0
     )
-    print(response.choices[0].message.content)
     return response.choices[0].message.content
 
 def extracted_data_to_excel(ws, data):
@@ -212,7 +204,7 @@ def write_json_to_excel(data, excel_path, map):
             refunds += [item]
 
     wb = load_workbook(excel_path)
-    ws = wb.create_sheet(title=f"{map} - {datetime.now().strftime('%Y-%m-%d')}")
+    ws = wb.create_sheet(title=f"{datetime.now().strftime('%m-%d _ %H-%M')}")
 
     ws.cell(row=1, column=1).value = "Boekingsdatum"
     ws.cell(row=1, column=2).value = "Datum"
@@ -253,18 +245,22 @@ def write_json_to_excel(data, excel_path, map):
     wb.save(excel_path)
     print(f"✅ Gegevens toegevoegd aan {excel_path}")
 
-def main(mail, date, map, excel):
+def main(service, date, map, excel):
     finish_label.configure(text="Bezig met mails lezen en in Excel zetten!", text_color="white")
     progress_label.configure(text= "")
-    email_list = email_to_text(mail, date, map)
+    email_list = email_to_text_gmail(service, date, map)
     json_items = []
     number_of_mails = len(email_list)
     number_of_handled_mails = 0
     progress_label.configure(text="0 van de " + str(number_of_mails) + " uitgelezen")
     for m in email_list:
         json_string = extract_flight_data(m)
+        print(json_string)
         try:
             item = json.loads(json_string)
+            if not isinstance(item, list):
+                print("⚠️ Verwacht list, kreeg:", type(item), item, " mail nummer: " ,number_of_handled_mails + 1)
+                continue
         except json.JSONDecodeError as e:
             finish_label.configure(text="AI geeft onleesbare vorm terug", text_color="red")
             print("JSON kon niet gelezen worden:", e)
@@ -273,12 +269,14 @@ def main(mail, date, map, excel):
         json_items += item
         number_of_handled_mails += 1
         progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
-
+    for i, item in enumerate(json_items):
+        if not isinstance(item, dict):
+            print(f"Fout item op index {i}: {item} (type {type(item)})")
     write_json_to_excel(json_items, excel, map)
-    finish_label.configure(text="Klaar! Selecteer een andere map of sluit het programma.")
+    finish_label.configure(text="Klaar! Selecteer een andere map of sluit het programma.", text_color="green")
 
 def start_main_thread():
-    thread = threading.Thread(target=lambda: main(mail, date_entry.get_date().strftime("%d-%b-%Y"), map.get(), excel_path.get()))
+    thread = threading.Thread(target=lambda: main(service, date_entry.get_date().strftime("%d-%b-%Y"), map.get(), excel_path.get()))
     thread.start()
 
 def browse_file():
@@ -292,19 +290,34 @@ def browse_file():
         run_btn.configure(state=tkinter.NORMAL)
 
 
-mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-mail.login(usr, pwd)
-status, mailboxes = mail.list()
-mailbox_names = []
-if status == 'OK':
-    for mbox in mailboxes:
-        decoded = mbox.decode()
-        parts = decoded.split(' "/" ')
-        if len(parts) == 2:
-            name = parts[1].strip('"')
-            mailbox_names += [str(name)]
-else:
-    print("Kon mailboxen niet ophalen")
+def get_gmail_service():
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    return build('gmail', 'v1', credentials=creds)
+
+def logout():
+    if os.path.exists("token.json"):
+        os.remove("token.json")
+        app.destroy()
+        sys.exit()
+    print("Uitgelogd: token verwijderd.")
+
+service = get_gmail_service()
+
+# labels ophalen
+results = service.users().labels().list(userId='me').execute()
+labels = results.get('labels', [])
+mailbox_names = [label['name'] for label in labels]
 
 # System setting
 customtkinter.set_appearance_mode("System")
@@ -343,6 +356,9 @@ run_btn = customtkinter.CTkButton(app, text="Start", command=start_main_thread)
 run_btn.pack(pady=(20,10))
 run_btn.configure(state=tkinter.DISABLED)
 
+logout_btn = customtkinter.CTkButton(app, text="Log uit", command=logout)
+logout_btn.pack(pady=(20,10))
+
 finish_label = customtkinter.CTkLabel(app, text = "")
 finish_label.pack()
 
@@ -352,4 +368,3 @@ progress_label.pack()
 
 # Run app
 app.mainloop()
-
