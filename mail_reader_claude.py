@@ -44,6 +44,7 @@ def email_to_text_gmail(service, date, label):
     results = service.users().messages().list(
         userId='me',
         q=query,
+        maxResults=1000,
         labelIds=[label_id] if label_id else None
     ).execute()
 
@@ -53,9 +54,11 @@ def email_to_text_gmail(service, date, label):
 
     for msg in messages:
         m = service.users().messages().get(userId='me', id=msg['id']).execute()
+        mail_timestamp = int(m.get('internalDate', 0)) / 1000
+        mail_date_str = datetime.fromtimestamp(mail_timestamp).strftime("%d-%m-%Y")
         payload = m['payload']
         parts = payload.get('parts', [])
-        complete_mail = ""
+        complete_mail = f"Verzenddatum: {mail_date_str} - "
 
         def walk_parts(parts_list):
             nonlocal complete_mail
@@ -91,7 +94,7 @@ def extract_flight_data(email_text):
         temperature=1,
         messages=[
             {"role": "user", "content": f"""
-Je bent een slimme data-extractie assistent voor een reisagent. Je krijgt telkens een email en mogelijke de toegevoegde bijlagen, de bijlagen start altijd met 'Text from PDF:'.
+Je krijgt telkens een email en mogelijke de toegevoegde bijlagen, de bijlagen start altijd met 'Text from PDF:'.
 Haal uit de mail de vluchtdetails en geef ze als JSON terug in dit formaat:
 [
     {{
@@ -105,32 +108,33 @@ Haal uit de mail de vluchtdetails en geef ze als JSON terug in dit formaat:
         "airline": "De naam van de maatschappij waarbij het ticket geboekt is"
     }},
 ]
-Deze vorm voor hotels:
+Deze vorm voor hotels, als het leeg is moet het op dezelfde manier als bij vluchten:
 [
     {{
         "type": "hotel",
-        "boekingsdatum": "In 95% van de gevallen de datum waarop de mail gestuurd is (mm/dd/jjjj) (mm/dd/jjjj)",
+        "boekingsdatum": "",
         "datum": "Incheck datum (mm/dd/jjjj)",
-        "passagier": "Volledige naam",
+        "passagier": "",
         "bestemming": "Naam hotel, Stad",
-        "prijs": "De totale eindprijs op het ticket, staat meestal achter total amount of paid by card of iets gelijkaardigs (vb 123.45)",
-        "PNR": "De boekingscode van op het ticket",
-        "airline": "De naam van de maatschappij waarbij het ticket geboekt is"
+        "prijs": "",
+        "PNR": "",
+        "airline": ""
     }},
 ]
-Deze vorm voor refunds:
+Deze vorm voor refunds, als het leeg is moet het op dezelfde manier als bij vluchten:
 [
     {{
         "type": "refund",
-        "boekingsdatum": "In 95% van de gevallen de datum waarop de mail gestuurd is (mm/dd/jjjj) (mm/dd/jjjj)",
-        "datum": "Incheck datum (mm/dd/jjjj)",
-        "passagier": "Volledige naam",
-        "bestemming": "Naam hotel, Stad",
+        "boekingsdatum": "",
+        "datum": "",
+        "passagier": "",
+        "bestemming": "",
         "prijs": "De totale eindprijs op het ticket met een minteken (vb -123.45)",
-        "PNR": "De boekingscode van op het ticket",
-        "airline": "De naam van de maatschappij waarbij het ticket geboekt is"
+        "PNR": "",
+        "airline": ""
     }},
 ]
+Regels:
 De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums en getallen
 Als er meerdere namen op het ticket staan moet elke passagier een eigen object zijn met alle info, maar enkel bij de eerste passagier mag de totale prijs staan en bij de andere moet de prijs leeg zijn.
 Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar de prijs mag enkel ingevuld zijn bij de heenvlucht.
@@ -140,16 +144,17 @@ Wanneer er een overstap gemaakt wordt hoeft dit niet vermeld te worden, dus bijv
 Een transfer hoort bij trein/ bus.
 Als er mr of iets gelijkaardigs in de naam zit staat dit voor meneer en moet je dit niet mee in de naam zetten.
 Plaatsnamen moeten altijd in het Nederlands (als het op het ticket niet het geval is moet je zelf vertalen) en altijd voluit. Enkel de naam van de stad is nodig de naam van de luchthaven hoeft niet.
-Wees consisten in de namen bijvoorbeeld: LOT of LOT airlines is altijd LOT, KLM airlines is gewoon KLM, Expedia en niet Expedia TAAP, NMBS, TAP Air Portugal is TAP... .
+Voorbeelden van maatschappijen die niet voluit hoeven: LOT of LOT airlines is altijd LOT, KLM airlines is gewoon KLM, Expedia en niet Expedia TAAP, TAP Air Portugal is TAP, Booking.com is Booking... .
 Namen van passagiers beginnen met een hoofdletter, maar mogen nooit in drukletters.
 Namen van maatschappijen altijd met hoofdletter.
-Er kan nooit een negatief bedrag zijn wanneer het type niet refund is.
 Bij LOT staan de namen in deze vorm: NAAM VOORNAAM Mr let er op dat je dit omdraait om consistent met de rest te blijven.
 Brussels Charleroi = Charleroi
 Bij refunds van KLM ga je enkel het boekingsnummer, boekingsdatum (datum van mail) en misschien de naam terugvinden, laat de rest dus gewoon open
-EXTREEM BELANGRIJK: IK WIL BIJ DE PRIJS NOOIT EUR ZIEN STAAN, EEN PRIJS IN EURO IS GEWOON EEN GETAL. EEN ANDERE VALUTA DAN EUR MOET WEL VERMELD WORDEN (VB/ 179.99 PLN).
-EXTREEM BELANGRIJK: IK WIL NOOIT ERGENS N/A ZIEN STAAN, DIT MOET HANDMATIG VERWIJDERD WORDEN EN HET VAKJE KAN DUS BETER ONMIDDELIJK OPENGELATEN WORDEN.
-EXTREEM BELANGRIJK: Geef alleen geldige JSON terug, zonder enige toelichting of tekst errond zoals ```json. Je respons moet dus exact in de vorm van de voorbeelden staan en mag hier absoluut niet van afwijken.
+EEN PRIJS IN EURO IS GEWOON EEN GETAL. EEN ANDERE VALUTA DAN EUR MOET WEL VERMELD WORDEN (VB/ 179.99 PLN).
+IK WIL NOOIT ERGENS N/A ZIEN STAAN! Laat dat ene ding dan gewoon leeg
+Geef alleen geldige JSON terug, zonder enige toelichting of tekst errond zoals ```json. Je respons moet dus exact in de vorm van de voorbeelden staan en mag hier absoluut niet van afwijken.
+Je response bevat soms nog steeds ```json of andere woorden. Dit mag echt niet want doordaar crasht de volledige applicatie
+Specifiek geval, enkel bij iets van NMBS: maatschappij is NMBS en PNR is de DNR op het ticket
 EMAIL:
 \"\"\"
 {email_text}
@@ -273,6 +278,7 @@ def main(service, date, map, excel):
         print(json_string)
         try:
             item = json.loads(json_string)
+            json_items += item
             if not isinstance(item, list):
                 print("⚠️ Verwacht list, kreeg:", type(item), item, " mail nummer: " ,number_of_handled_mails + 1)
                 continue
@@ -280,8 +286,7 @@ def main(service, date, map, excel):
             finish_label.configure(text="AI geeft onleesbare vorm terug", text_color="red")
             print("JSON kon niet gelezen worden:", e)
             print(json_string)
-            quit()
-        json_items += item
+            continue
         number_of_handled_mails += 1
         progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
     for i, item in enumerate(json_items):
@@ -344,7 +349,7 @@ app.geometry("720x480")
 app.title("Excel assistent")
 
 # UI Elements
-date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail in (vb. 01-Aug-2025)")
+date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail in")
 date_title.pack(pady=(10,0))
 
 date = tkinter.StringVar()
