@@ -113,7 +113,7 @@ Deze vorm voor hotels, als het leeg is moet het op dezelfde manier als bij vluch
     {{
         "type": "hotel",
         "boekingsdatum": "",
-        "datum": "Incheck datum (mm/dd/jjjj)",
+        "datum": "Incheck datum (dd/mm) - uitcheck datum (dd/mm)",
         "passagier": "",
         "bestemming": "Naam hotel, Stad",
         "prijs": "",
@@ -136,10 +136,11 @@ Deze vorm voor refunds, als het leeg is moet het op dezelfde manier als bij vluc
 ]
 Regels:
 De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums en getallen
-Als er meerdere namen op het ticket staan moet elke passagier een eigen object zijn met alle info, maar enkel bij de eerste passagier mag de totale prijs staan en bij de andere moet de prijs leeg zijn.
-Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar de prijs mag enkel ingevuld zijn bij de heenvlucht.
-Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan eerst voor alle namen de eerste vlucht en dan voor alle namen de andere vlucht.
-Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' '#aantal kamers' x.
+Als er meerdere namen op het ticket staan moet elke passagier een eigen object zijn maar enkel bij de eerste passagier moet alle info staan bij de andere passagiers enkel hun naam.
+Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar bij de terugvlucht mag enkel de datum en bestemming staan.
+Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan telkens heen en terugvlucht per persoon achter elkaar. Bij de eerste vlucht van de eerste passagier moet alles ingevuld zijn, daarna enkel datum, naam, bestemming.
+Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' 'aantal kamers' x.
+Bij expedia moet je het bedrag nemen waar bij staat betaald aan expedia. Als dit er niet staat neem je het hoogste bedrag.
 Wanneer er een overstap gemaakt wordt hoeft dit niet vermeld te worden, dus bijvoorbeeld Amsterdam - Warschau en Warschau - Wroclaw op dezelfde datum wordt Amsterdam - Wroclaw.
 Een transfer hoort bij trein/ bus.
 Als er mr of iets gelijkaardigs in de naam zit staat dit voor meneer en moet je dit niet mee in de naam zetten.
@@ -188,9 +189,9 @@ def extracted_data_to_excel(ws, data):
             cell = ws.cell(row=row, column=7, value=price)
             cell.number_format = "#,##0.00"
         except ValueError:
-            ws.cell(row=row, column=7).value = item.get("prijs", "")
-        ws.cell(row=row, column=8).value = item.get("PNR", "")
-        ws.cell(row=row, column=9).value = item.get("airline", "")
+            ws.cell(row=row, column=11).value = item.get("prijs", "")
+        ws.cell(row=row, column=12).value = item.get("PNR", "")
+        ws.cell(row=row, column=13).value = item.get("airline", "")
         row += 1
     return row
 
@@ -232,9 +233,13 @@ def write_json_to_excel(data, excel_path, map):
     ws.cell(row=1, column=4).value = "Passagier"
     ws.cell(row=1, column=5).value = "Bestemming"
     ws.cell(row=1, column=6).value = "Prijs"
-    ws.cell(row=1, column=7).value = "Prijs Excel"
-    ws.cell(row=1, column=8).value = "PNR"
-    ws.cell(row=1, column=9).value = "Airline"
+    ws.cell(row=1, column=7).value = "Fee"
+    ws.cell(row=1, column=8).value = ""
+    ws.cell(row=1, column=9).value = "Voorgesteld alternatief"
+    ws.cell(row=1, column=10).value = "Missed/ Earned Savings"
+    ws.cell(row=1, column=11).value = "Prijs Excel"
+    ws.cell(row=1, column=12).value = "PNR"
+    ws.cell(row=1, column=13).value = "Airline"
 
     row = 2
     highlight = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -315,14 +320,19 @@ def get_gmail_service():
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+        try:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    'credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+        except Exception as e:
+            if os.path.exists('token.json'):
+                os.remove('token.json')
+            return get_gmail_service()
     return build('gmail', 'v1', credentials=creds)
 
 def logout():
