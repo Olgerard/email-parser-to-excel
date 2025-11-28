@@ -135,10 +135,10 @@ Deze vorm voor refunds, als het leeg is moet het op dezelfde manier als bij vluc
     }},
 ]
 Regels:
-De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums en getallen
-Als er meerdere namen op het ticket staan moet elke passagier een eigen object zijn maar enkel bij de eerste passagier moet alle info staan bij de andere passagiers enkel hun naam.
+De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums (behalve bij de verblijfdatum van hotels) en getallen
+Als er meerdere namen op het ticket staan en maar 1 vlucht moet elke passagier een eigen object zijn maar enkel bij de eerste passagier moet alle info staan bij de andere passagiers enkel hun naam.
 Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar bij de terugvlucht mag enkel de datum en bestemming staan.
-Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan telkens heen en terugvlucht per persoon achter elkaar. Bij de eerste vlucht van de eerste passagier moet alles ingevuld zijn, daarna enkel datum, naam, bestemming.
+Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan telkens heen en terugvlucht per persoon achter elkaar. Bij de eerste vlucht van de eerste passagier moet alles ingevuld zijn, daarna enkel datum, naam, bestemming. Dus voor elke persoon twee objecten (heen en terugvlucht), maar enkel bij de eerste persoon en de eerste vlucht moet alles ingevuld zijn.
 Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' 'aantal kamers' x.
 Bij expedia moet je het bedrag nemen waar bij staat betaald aan expedia. Als dit er niet staat neem je het hoogste bedrag.
 Wanneer er een overstap gemaakt wordt hoeft dit niet vermeld te worden, dus bijvoorbeeld Amsterdam - Warschau en Warschau - Wroclaw op dezelfde datum wordt Amsterdam - Wroclaw.
@@ -186,7 +186,7 @@ def extracted_data_to_excel(ws, data):
         ws.cell(row=row, column=6).value = ""
         try:
             price = float(item["prijs"])
-            cell = ws.cell(row=row, column=7, value=price)
+            cell = ws.cell(row=row, column=11, value=price)
             cell.number_format = "#,##0.00"
         except ValueError:
             ws.cell(row=row, column=11).value = item.get("prijs", "")
