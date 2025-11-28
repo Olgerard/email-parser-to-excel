@@ -8,6 +8,7 @@ from PyPDF2 import PdfReader
 from anthropic import Anthropic
 import json
 from openpyxl import load_workbook
+from openpyxl.styles import numbers
 from dotenv import load_dotenv
 import tkinter
 import customtkinter
@@ -99,8 +100,8 @@ Haal uit de mail de vluchtdetails en geef ze als JSON terug in dit formaat:
 [
     {{
         "type": "Opties tussen: vlucht of trein/bus",
-        "boekingsdatum": In 95% van de gevallen de datum waarop de mail gestuurd is (mm/dd/jjjj)",
-        "datum": "De datum van de reis (mm/dd/jjjj)",
+        "boekingsdatum": In 95% van de gevallen de datum waarop de mail gestuurd is (dd/mm/jjjj)",
+        "datum": "De datum van de reis (dd/mm/jjjj)",
         "passagier": "Volledige naam",
         "bestemming": "Stad van vertrek - Stad van aankomst",
         "prijs": "De totale eindprijs op het ticket, staat meestal achter total amount of paid by card of iets gelijkaardigs (vb 123.45)",
@@ -135,26 +136,41 @@ Deze vorm voor refunds, als het leeg is moet het op dezelfde manier als bij vluc
     }},
 ]
 Regels:
-De informatie in de JSON objecten wordt in Excel gezet. Houdt hier rekening mee (bv datums: niet 08/20/2025, maar 8/20/2025). Blijf dus ook constistent en behoudt de amerikaane vorm voor datums (behalve bij de verblijfdatum van hotels) en getallen
+De informatie in de JSON objecten wordt in Excel gezet, houdt hier rekening mee.
+
 Als er meerdere namen op het ticket staan en maar 1 vlucht moet elke passagier een eigen object zijn maar enkel bij de eerste passagier moet alle info staan bij de andere passagiers enkel hun naam.
-Als er een heen en terugvlucht op het ticket staat moeten beide een object zijn, maar bij de terugvlucht mag enkel de datum en bestemming staan.
-Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan telkens heen en terugvlucht per persoon achter elkaar. Bij de eerste vlucht van de eerste passagier moet alles ingevuld zijn, daarna enkel datum, naam, bestemming. Dus voor elke persoon twee objecten (heen en terugvlucht), maar enkel bij de eerste persoon en de eerste vlucht moet alles ingevuld zijn.
-Wanneer er bij een hotel enkel Company of Pieter Smit staat en geen passagiersnaam wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL als dit vermeld is' 'aantal kamers' x.
-Bij expedia moet je het bedrag nemen waar bij staat betaald aan expedia. Als dit er niet staat neem je het hoogste bedrag.
+
+Als er een heen en terugvlucht met 1 passagier op het ticket staat moeten beide een object zijn, maar bij de terugvlucht mag enkel de datum en bestemming staan.
+
+Als er meerdere vluchten en meerdere passagiers in 1 mail staan dan doen alle passagiers al de vluchten. Zet dan telkens heen en terugvlucht per persoon achter elkaar. Bij de eerste vlucht van de eerste passagier moet alles ingevuld zijn, daarna enkel type, datum, naam, bestemming. Dus voor elke persoon twee objecten (heen en terugvlucht). Zie het volgende voorbeeld voor een ticket met een heen en terugvlucht en twee passagiers, zo moet het ingevuld worden Vb: [{{"type": "vlucht", "boekingsdatum": 09/10/2025", "datum": "18/10/2025", "passagier": "Jan De Man", "bestemming": "Charleroi - Warschau", "prijs": "623.45", "PNR": "JDPUMFL"}},{{"type": "vlucht", "boekingsdatum:"", "datum": "25/10/2025", "passagier": "", "bestemming": "Warschau - Amsterdam", "prijs": "", "PNR": ""}},{{"type": "vlucht", "boekingsdatum":", "datum": "18/10/2025", "passagier": "Ella Wouters", "bestemming": "Charleroi - Warschau", "prijs": "", "PNR": ""}},{{"type": "vlucht", "boekingsdatum":", "datum": "25/10/2025", "passagier": "", "bestemming": "Warschau - Amsterdam", "prijs": "", "PNR": ""}},]
+
+Wanneer er bij een hotel enkel Company of Pieter Smit staat als gast wordt passagier bij hotel: "Company of Pieter Smit 'BE/NL/... als dit vermeld is' 'aantal kamers' x. (vb: Company of Pieter Smit NL 3x)
+
+Bij expedia moet je het bedrag nemen waar bijstaat betaald aan expedia.
+
 Wanneer er een overstap gemaakt wordt hoeft dit niet vermeld te worden, dus bijvoorbeeld Amsterdam - Warschau en Warschau - Wroclaw op dezelfde datum wordt Amsterdam - Wroclaw.
+
 Een transfer hoort bij trein/ bus.
-Als er mr of iets gelijkaardigs in de naam zit staat dit voor meneer en moet je dit niet mee in de naam zetten.
+
+Als er mr of iets gelijkaardigs in de naam zit staat dit voor meneer en moet je dit niet mee in de naam zetten (vaak bij TAP).
+
 Plaatsnamen moeten altijd in het Nederlands (als het op het ticket niet het geval is moet je zelf vertalen) en altijd voluit. Enkel de naam van de stad is nodig de naam van de luchthaven hoeft niet.
+
 Voorbeelden van maatschappijen die niet voluit hoeven: LOT of LOT airlines is altijd LOT, KLM airlines is gewoon KLM, Expedia en niet Expedia TAAP, TAP Air Portugal is TAP, Booking.com is Booking... .
+
 Namen van passagiers beginnen met een hoofdletter, maar mogen nooit in drukletters.
+
 Namen van maatschappijen altijd met hoofdletter.
-Bij LOT staan de namen in deze vorm: NAAM VOORNAAM Mr let er op dat je dit omdraait om consistent met de rest te blijven.
-Brussels Charleroi = Charleroi
+
+Bij LOT en soms TAP staan de namen in deze vorm: NAAM VOORNAAM Mr let er op dat je dit omdraait om consistent met de rest te blijven.
+
 Bij refunds van KLM ga je enkel het boekingsnummer, boekingsdatum (datum van mail) en misschien de naam terugvinden, laat de rest dus gewoon open
+
 EEN PRIJS IN EURO IS GEWOON EEN GETAL. EEN ANDERE VALUTA DAN EUR MOET WEL VERMELD WORDEN (VB/ 179.99 PLN).
+
 IK WIL NOOIT ERGENS N/A ZIEN STAAN! Laat dat ene ding dan gewoon leeg
 Geef alleen geldige JSON terug, zonder enige toelichting of tekst errond zoals ```json. Je respons moet dus exact in de vorm van de voorbeelden staan en mag hier absoluut niet van afwijken.
-Je response bevat soms nog steeds ```json of andere woorden. Dit mag echt niet want doordaar crasht de volledige applicatie
+
 Specifiek geval, enkel bij iets van NMBS: maatschappij is NMBS en PNR is de DNR op het ticket
 EMAIL:
 \"\"\"
@@ -169,15 +185,15 @@ def extracted_data_to_excel(ws, data):
     row = ws.max_row + 1
     for item in data:
         try:
-            date_obj = datetime.strptime(item["boekingsdatum"], "%m/%d/%Y").date()
+            date_obj = datetime.strptime(item["boekingsdatum"], "%d/%m/%Y").date()
             cell = ws.cell(row=row, column=1, value=date_obj)
-            cell.number_format = "MM/DD/YYYY"
+            cell.number_format = "DD/MM/YYYY"
         except ValueError:
             ws.cell(row=row, column=1).value = item.get("boekingsdatum", "")
         try:
-            date_obj = datetime.strptime(item["datum"], "%m/%d/%Y").date()
+            date_obj = datetime.strptime(item["datum"], "%d/%m/%Y").date()
             cell = ws.cell(row=row, column=2, value=date_obj)
-            cell.number_format = "MM/DD/YYYY"
+            cell.number_format = "DD/MM/YYYY"
         except ValueError:
             ws.cell(row=row, column=2).value = item.get("datum", "")
         ws.cell(row=row, column=3).value = ""
@@ -266,6 +282,14 @@ def write_json_to_excel(data, excel_path, map):
         ws.cell(row=row + 1, column=1).fill = highlight
         ws.cell(row=row + 1, column=1).font = Font(bold=True)
         extracted_data_to_excel(ws, refunds)
+
+    for row in ws.iter_rows(min_row=2, max_row=1000, min_col=1, max_col=2):
+        for cell in row:
+            cell.number_format = numbers.FORMAT_DATE_DDMMYY
+
+    for row in ws.iter_rows(min_row=2, max_row=1000 ,min_col=11, max_col=11):
+        for cell in row:
+            cell.number_format = "#,##0.00"
 
     wb.save(excel_path)
     print(f"✅ Gegevens toegevoegd aan {excel_path}")
