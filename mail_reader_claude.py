@@ -366,6 +366,7 @@ def logout():
         sys.exit()
     print("Uitgelogd: token verwijderd.")
 
+
 service = get_gmail_service()
 
 # labels ophalen
@@ -394,8 +395,9 @@ date_entry.pack(padx=10, pady=(10,20))
 map_title = customtkinter.CTkLabel(app, text="Vul de naam van de map in (vb. NL)")
 map_title.pack()
 
+all_mailboxes = mailbox_names.copy()
 map = tkinter.StringVar()
-cb = ttk.Combobox(app, values=mailbox_names, textvariable=map, width=25, height=40)
+cb = ttk.Combobox(app, values=all_mailboxes, textvariable=map, width=25, height=40)
 cb.configure(font=tkFont.Font(size=14) )
 cb.pack(pady=(0,10))
 
@@ -419,6 +421,17 @@ finish_label.pack()
 progress_label = customtkinter.CTkLabel(app, text = "")
 progress_label.pack()
 
+def filter_mailboxes(event):
+    typed = map.get().lower()
+
+    if typed == "":
+        cb["values"] = all_mailboxes
+    else:
+        cb["values"] = [
+            m for m in all_mailboxes if typed in m.lower()
+        ]
+
+cb.bind("<KeyRelease>", filter_mailboxes)
 
 # Run app
 app.mainloop()
