@@ -8,7 +8,6 @@ from PyPDF2 import PdfReader
 from anthropic import Anthropic
 import json
 from openpyxl import load_workbook
-from openpyxl.styles import numbers
 from dotenv import load_dotenv
 import tkinter
 import customtkinter
@@ -16,8 +15,7 @@ import threading
 from tkinter import filedialog
 from tkinter import ttk
 import tkinter.font as tkFont
-
-from tensorflow import truediv
+from openpyxl.styles import numbers
 from tkcalendar import DateEntry
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -35,7 +33,8 @@ if not client:
     quit()
 
 def email_to_text_gmail(service, date, label):
-    query = f'after:{datetime.strptime(date, "%d-%b-%Y").strftime("%Y/%m/%d")} before:2026/01/29'
+    query = f'after:{datetime.strptime(date, "%d-%b-%Y").strftime("%Y/%m/%d")}'
+    print(query)
     if label:
         all_labels = service.users().labels().list(userId='me').execute().get('labels', [])
         label_id = next((l['id'] for l in all_labels if l['name'] == label), None)
@@ -125,7 +124,9 @@ def extract_flight_data(email_text):
         "type": "hotel",
         "boekingsdatum": "",
         "datum": "Incheck datum (dd/mm) - uitcheck datum (dd/mm)",
-        "passagier": "",
+        "passagiers": [
+            {{"naam": "voornaam achternaam"}}
+        ],
         "bestemming": "Naam hotel, Stad",
         "prijs": "",
         "PNR": "",
@@ -135,10 +136,12 @@ def extract_flight_data(email_text):
     Deze vorm voor refunds, als het leeg is moet het op dezelfde manier als bij vluchten:
     [{{
         "type": "refund",
-        "boekingsdatum": "",
-        "datum": "",
-        "passagier": "",
-        "bestemming": "",
+        "boekingsdatum": "dd/mm/jjjj",
+        "datum": "dd/mm/jjjj",
+        "passagiers": [
+            {{"naam": "voornaam achternaam"}}
+        ],
+        "bestemming": "Enkel heenvlucht (vb Brussel - Amsterdam)",
         "prijs": vb -123.45",
         "PNR": "",
         "airline": ""
@@ -189,127 +192,105 @@ def extract_flight_data(email_text):
     )
     return response.content[0].text
 
-def extracted_data_to_excel(ws, data):
-    row = ws.max_row + 1
-    for item in data:
-        try:
-            date_obj = datetime.strptime(item["boekingsdatum"], "%d/%m/%Y").date()
-            cell = ws.cell(row=row, column=1, value=date_obj)
-            cell.number_format = "DD/MM/YYYY"
-        except (ValueError, KeyError):
-            ws.cell(row=row, column=1).value = item.get("boekingsdatum", "")
-        try:
-            date_obj = datetime.strptime(item["datum"], "%d/%m/%Y").date()
-            cell = ws.cell(row=row, column=2, value=date_obj)
-            cell.number_format = "DD/MM/YYYY"
-        except (ValueError, KeyError):
-            ws.cell(row=row, column=2).value = item.get("datum", "")
-        ws.cell(row=row, column=3).value = ""
-        ws.cell(row=row, column=4).value = item.get("passagier", "")
-        ws.cell(row=row, column=5).value = item.get("bestemming", "")
-        ws.cell(row=row, column=6).value = ""
-        try:
-            price = float(item["prijs"])
-            cell = ws.cell(row=row, column=11, value=price)
-            cell.number_format = "#,##0.00"
-        except (ValueError, KeyError):
-            ws.cell(row=row, column=11).value = item.get("prijs", "")
-        ws.cell(row=row, column=12).value = item.get("PNR", "")
-        ws.cell(row=row, column=13).value = item.get("airline", "")
-        row += 1
-    return row
+def extracted_data_to_excel(ws, row, item):
+    passagiers = item.get("passagiers", [])
+    first_passenger = True
+    current_row = row
 
-def extracted_flightdata_to_excel(ws, data):
-    row = ws.max_row + 1
-    for item in data:
-        first_destination = True
-        bestemmingen = item.get("bestemming",[])
-        datums = item.get("datums", [])
-        passagiers = item.get("passagiers", [])
+    for passenger in passagiers:
+        ws.insert_rows(current_row)
+        if first_passenger:
+            try:
+                date_obj = datetime.strptime(item["boekingsdatum"], "%d/%m/%Y").date()
+                cell = ws.cell(row=current_row, column=1, value=date_obj)
+                cell.number_format = "DD/MM/YYYY"
+            except (ValueError, KeyError):
+                ws.cell(row=current_row, column=1).value = item.get("boekingsdatum", "")
+            try:
+                date_obj = datetime.strptime(item["datum"], "%d/%m/%Y").date()
+                cell = ws.cell(row=current_row, column=2, value=date_obj)
+                cell.number_format = "DD/MM/YYYY"
+            except (ValueError, KeyError):
+                ws.cell(row=current_row, column=2).value = item.get("datum", "")
+            ws.cell(row=current_row, column=3).value = ""
+            ws.cell(row=current_row, column=5).value = item.get("bestemming", "")
+            ws.cell(row=current_row, column=6).value = ""
+            try:
+                price = float(item["prijs"])
+                cell = ws.cell(row=current_row, column=11, value=price)
+                cell.number_format = "#,##0.00"
+            except (ValueError, KeyError):
+                ws.cell(row=current_row, column=11).value = item.get("prijs", "")
+            ws.cell(row=current_row, column=12).value = item.get("PNR", "")
+            ws.cell(row=current_row, column=13).value = item.get("airline", "")
+        ws.cell(row=current_row, column=4).value = passenger.get("naam", "")
+        current_row += 1
+        first_passenger = False
 
-        for dest_index, dest in enumerate(bestemmingen):
-            first_passenger = True
+def extracted_flightdata_to_excel(ws, row, item):
+    first_destination = True
+    bestemmingen = item.get("bestemming",[])
+    datums = item.get("datums", [])
+    passagiers = item.get("passagiers", [])
 
-            datum = datums[dest_index].get("datum", "") if dest_index < len(datums) else ""
+    current_row = row
 
-            for passenger in passagiers:
-                if first_passenger and first_destination:
-                    try:
-                        date_obj = datetime.strptime(item.get("boekingsdatum", ""), "%d/%m/%Y").date()
-                        cell = ws.cell(row=row, column=1, value=date_obj)
-                        cell.number_format = "DD/MM/YYYY"
-                    except (ValueError, AttributeError):
-                        ws.cell(row=row, column=1).value = item.get("boekingsdatum", "")
+    for dest_index, dest in enumerate(bestemmingen):
+        first_passenger = True
 
-                    try:
-                        date_obj = datetime.strptime(datum, "%d/%m/%Y").date()
-                        cell = ws.cell(row=row, column=2, value=date_obj)
-                        cell.number_format = "DD/MM/YYYY"
-                    except (ValueError, AttributeError):
-                        ws.cell(row=row, column=2).value = datum
+        datum = datums[dest_index].get("datum", "") if dest_index < len(datums) else ""
 
-                    ws.cell(row=row, column=3).value = ""
-                    ws.cell(row=row, column=4).value = passenger.get("naam", "")
-                    ws.cell(row=row, column=5).value = dest.get("vlucht", "")
-                    ws.cell(row=row, column=6).value = ""
+        for passenger in passagiers:
 
-                    try:
-                        price = float(item["prijs"])
-                        cell = ws.cell(row=row, column=11, value=price)
-                        cell.number_format = "#,##0.00"
-                    except (ValueError, KeyError):
-                        ws.cell(row=row, column=11).value = item.get("prijs", "")
+            ws.insert_rows(current_row)
 
-                    ws.cell(row=row, column=12).value = item.get("PNR", "")
-                    ws.cell(row=row, column=13).value = item.get("airline", "")
+            if first_passenger and first_destination:
+                try:
+                    date_obj = datetime.strptime(item.get("boekingsdatum", ""), "%d/%m/%Y").date()
+                    cell = ws.cell(row=current_row, column=1, value=date_obj)
+                    cell.number_format = "DD/MM/YYYY"
+                except (ValueError, AttributeError):
+                    ws.cell(row=current_row, column=1).value = item.get("boekingsdatum", "")
 
-                else:
-                    try:
-                        date_obj = datetime.strptime(datum, "%d/%m/%Y").date()
-                        cell = ws.cell(row=row, column=2, value=date_obj)
-                        cell.number_format = "DD/MM/YYYY"
-                    except (ValueError, KeyError):
-                        ws.cell(row=row, column=2).value = datum
+                try:
+                    date_obj = datetime.strptime(datum, "%d/%m/%Y").date()
+                    cell = ws.cell(row=current_row, column=2, value=date_obj)
+                    cell.number_format = "DD/MM/YYYY"
+                except (ValueError, AttributeError):
+                    ws.cell(row=current_row, column=2).value = datum
 
-                    ws.cell(row=row, column=4).value = passenger.get("naam", "")
-                    #ws.cell(row=row, column=5).value = dest.get("vlucht", "")
+                ws.cell(row=current_row, column=3).value = ""
+                ws.cell(row=current_row, column=4).value = passenger.get("naam", "")
+                ws.cell(row=current_row, column=5).value = dest.get("vlucht", "")
+                ws.cell(row=current_row, column=6).value = ""
 
-                row += 1
-                first_passenger = False
+                try:
+                    price = float(item["prijs"])
+                    cell = ws.cell(row=current_row, column=11, value=price)
+                    cell.number_format = "#,##0.00"
+                except (ValueError, KeyError):
+                    ws.cell(row=current_row, column=11).value = item.get("prijs", "")
 
-            first_destination = False
+                ws.cell(row=current_row, column=12).value = item.get("PNR", "")
+                ws.cell(row=current_row, column=13).value = item.get("airline", "")
 
-    return row
+            else:
+                try:
+                    date_obj = datetime.strptime(datum, "%d/%m/%Y").date()
+                    cell = ws.cell(row=current_row, column=2, value=date_obj)
+                    cell.number_format = "DD/MM/YYYY"
+                except (ValueError, KeyError):
+                    ws.cell(row=current_row, column=2).value = datum
 
-def write_json_to_excel(data, excel_path, map):
-    data_without_duplicates = []
-    i = 0
-    while i < len(data):
-        j = 0
-        duplicate = False
-        while j < i:
-            if data[i] == data[j]:
-                duplicate = True
-            j += 1
-        if not duplicate:
-            data_without_duplicates += [data[i]]
-        i += 1
+                ws.cell(row=current_row, column=4).value = passenger.get("naam", "")
+                ws.cell(row=current_row, column=5).value = dest.get("vlucht", "")
 
-    flights = []
-    trains = []
-    hotels = []
-    refunds = []
-    for item in data_without_duplicates:
-        ticket_type = item.get("type", "")
-        if ticket_type == "vlucht":
-            flights += [item]
-        elif ticket_type == "trein/bus":
-            trains += [item]
-        elif ticket_type == "hotel":
-            hotels += [item]
-        else:
-            refunds += [item]
+            current_row += 1
+            first_passenger = False
 
+        first_destination = False
+
+def initialize_excel_sheet(excel_path, map):
     wb = load_workbook(excel_path)
     prefix_map = {
         "INBOX/Dossiers/0 Excel NL": "NL",
@@ -337,75 +318,128 @@ def write_json_to_excel(data, excel_path, map):
     ws.cell(row=1, column=12).value = "PNR"
     ws.cell(row=1, column=13).value = "Airline"
 
-    row = 2
     highlight = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    if len(flights) != 0:
-        ws.cell(row=row, column=1).value = "Vluchten"
-        ws.cell(row=row, column=1).fill = highlight
-        ws.cell(row=row, column=1).font = Font(bold=True)
-        row = extracted_flightdata_to_excel(ws, flights)
 
-    if len(trains) != 0:
-        ws.cell(row=row + 1, column=1).value = "Trein/bus"
-        ws.cell(row=row + 1, column=1).fill = highlight
-        ws.cell(row=row + 1, column=1).font = Font(bold=True)
-        row = extracted_flightdata_to_excel(ws, trains)
+    row = 2
+    ws.cell(row=row, column=1).value = "Vluchten"
+    ws.cell(row=row, column=1).fill = highlight
+    ws.cell(row=row, column=1).font = Font(bold=True)
 
-    if len(hotels) != 0:
-        ws.cell(row=row + 1, column=1).value = "Hotels"
-        ws.cell(row=row + 1, column=1).fill = highlight
-        ws.cell(row=row + 1, column=1).font = Font(bold=True)
-        row = extracted_data_to_excel(ws, hotels)
+    row += 2
+    ws.cell(row=row, column=1).value = "Trein/bus"
+    ws.cell(row=row, column=1).fill = highlight
+    ws.cell(row=row, column=1).font = Font(bold=True)
 
-    if len(refunds) != 0:
-        ws.cell(row=row + 1, column=1).value = "Refunds"
-        ws.cell(row=row + 1, column=1).fill = highlight
-        ws.cell(row=row + 1, column=1).font = Font(bold=True)
-        extracted_data_to_excel(ws, refunds)
+    row += 2
+    ws.cell(row=row, column=1).value = "Hotels"
+    ws.cell(row=row, column=1).fill = highlight
+    ws.cell(row=row, column=1).font = Font(bold=True)
 
-    for row in ws.iter_rows(min_row=2, max_row=1000, min_col=1, max_col=2):
+    row += 2
+    ws.cell(row=row, column=1).value = "Refunds"
+    ws.cell(row=row, column=1).fill = highlight
+    ws.cell(row=row, column=1).font = Font(bold=True)
+
+    wb.save(excel_path)
+    return title
+
+def append_item_to_excel(item, excel_path, sheet_name):
+    wb = load_workbook(excel_path)
+    ws = wb[sheet_name]
+
+    ticket_type = item.get("type","")
+
+    section_names = {
+        "vlucht": "Vluchten",
+        "trein/bus": "Trein/bus",
+        "hotel": "Hotels"
+    }
+    section_name = section_names.get(ticket_type, "Refunds")
+
+    section_start = 0
+    for row in range(2, ws.max_row + 1):
+        if ws.cell(row=row, column=1).value == section_name:
+            section_start = row
+            break
+
+    if section_start == 0:
+        print(f"⚠️ WAARSCHUWING: Sectie '{section_name}' niet gevonden! Item overgeslagen.")
+        return
+
+    next_section_row = None
+    for row in range(section_start + 1, ws.max_row + 1):
+        cell_value = ws.cell(row=row, column=1).value
+        if cell_value in ["Vluchten", "Trein/bus", "Hotels", "Refunds"]:
+            next_section_row = row
+            break
+
+    if next_section_row:
+        insert_row = next_section_row - 1
+    else:
+        insert_row = ws.max_row + 1
+
+    if ticket_type == "vlucht" or ticket_type == "trein/bus":
+        extracted_flightdata_to_excel(ws, insert_row, item)
+    else:
+        extracted_data_to_excel(ws, insert_row, item)
+
+    format_excel_cells(ws)
+    wb.save(excel_path)
+
+def format_excel_cells(ws):
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=2):
         for cell in row:
             cell.number_format = numbers.FORMAT_DATE_DDMMYY
 
-    for row in ws.iter_rows(min_row=2, max_row=1000 ,min_col=11, max_col=11):
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=11, max_col=11):
         for cell in row:
             cell.number_format = "#,##0.00"
-
-    wb.save(excel_path)
-    print(f"✅ Gegevens toegevoegd aan {excel_path}")
 
 def main(service, date, map, excel):
     finish_label.configure(text="Bezig met mails lezen en in Excel zetten!", text_color="white")
     progress_label.configure(text= "")
+
+    try:
+        sheet_name = initialize_excel_sheet(excel, map)
+    except Exception as e:
+        finish_label.configure(text=f"Error bij aanmaken Excel sheet: {e}", text_color="red")
+        print(e)
+        return
+
     email_list = email_to_text_gmail(service, date, map)
-    json_items = []
     number_of_mails = len(email_list)
     number_of_handled_mails = 0
-    progress_label.configure(text="0 van de " + str(number_of_mails) + " uitgelezen")
+    progress_label.configure(text=f"0 van de {number_of_mails} uitgelezen")
+
     for m in email_list:
-        json_string = extract_flight_data(m)
-        print(json_string)
         try:
-            finish_label.configure(text="", text_color="red")
-            item = json.loads(json_string)
-            json_items += item
-            if not isinstance(item, list):
-                print("⚠️ Verwacht list, kreeg:", type(item), item, " mail nummer: " ,number_of_handled_mails + 1)
-                continue
+            json_string = extract_flight_data(m)
+            print(json_string)
+            parsed = json.loads(json_string)
+            if isinstance(parsed, list):
+                if len(parsed) > 0:
+                    item = parsed[0]
+                else:
+                    print("⚠️ Lege lijst ontvangen van AI, email overgeslagen")
+                    continue
+            else:
+                item = parsed
 
+            append_item_to_excel(item, excel, sheet_name)
 
+            number_of_handled_mails += 1
+            progress_label.configure(text=f"{number_of_handled_mails} van de {number_of_mails} uitgelezen")
 
         except json.JSONDecodeError as e:
             finish_label.configure(text="AI geeft onleesbare vorm terug", text_color="red")
             print("JSON kon niet gelezen worden:", e)
             print(json_string)
             continue
-        number_of_handled_mails += 1
-        progress_label.configure(text= str(number_of_handled_mails) + " van de " + str(number_of_mails) + " uitgelezen")
-    for i, item in enumerate(json_items):
-        if not isinstance(item, dict):
-            print(f"Fout item op index {i}: {item} (type {type(item)})")
-    write_json_to_excel(json_items, excel, map)
+
+        except Exception as e:
+            print(f"Onverwachte error: {e}")
+            continue
+
     finish_label.configure(text="Klaar! Selecteer een andere map of sluit het programma.", text_color="green")
 
 def start_main_thread():
