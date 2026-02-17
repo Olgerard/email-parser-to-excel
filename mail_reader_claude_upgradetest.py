@@ -35,7 +35,7 @@ if not client:
     quit()
 
 def email_to_text_gmail(service, date, label):
-    query = f'after:{datetime.strptime(date, "%d-%b-%Y").strftime("%Y/%m/%d")}'
+    query = f'after:{datetime.strptime(date, "%d-%b-%Y").strftime("%Y/%m/%d")} before:2026/01/29'
     if label:
         all_labels = service.users().labels().list(userId='me').execute().get('labels', [])
         label_id = next((l['id'] for l in all_labels if l['name'] == label), None)
@@ -178,7 +178,7 @@ def extract_flight_data(email_text):
     - Leeg string "", NOOIT "N/A" of null
     
     **Output:**
-    - Alleen pure JSON, geen ```json tags, geen tekst eromheen
+    - Alleen pure JSON, geen ```json tags (Dit zorgt ervoor dat heel het programma crasht en is extreem belangrijk!!!), geen tekst eromheen
     - Exact formaat zoals voorbeelden
     EMAIL:
     \"\"\"
@@ -196,13 +196,13 @@ def extracted_data_to_excel(ws, data):
             date_obj = datetime.strptime(item["boekingsdatum"], "%d/%m/%Y").date()
             cell = ws.cell(row=row, column=1, value=date_obj)
             cell.number_format = "DD/MM/YYYY"
-        except ValueError:
+        except (ValueError, KeyError):
             ws.cell(row=row, column=1).value = item.get("boekingsdatum", "")
         try:
             date_obj = datetime.strptime(item["datum"], "%d/%m/%Y").date()
             cell = ws.cell(row=row, column=2, value=date_obj)
             cell.number_format = "DD/MM/YYYY"
-        except ValueError:
+        except (ValueError, KeyError):
             ws.cell(row=row, column=2).value = item.get("datum", "")
         ws.cell(row=row, column=3).value = ""
         ws.cell(row=row, column=4).value = item.get("passagier", "")
@@ -212,7 +212,7 @@ def extracted_data_to_excel(ws, data):
             price = float(item["prijs"])
             cell = ws.cell(row=row, column=11, value=price)
             cell.number_format = "#,##0.00"
-        except ValueError:
+        except (ValueError, KeyError):
             ws.cell(row=row, column=11).value = item.get("prijs", "")
         ws.cell(row=row, column=12).value = item.get("PNR", "")
         ws.cell(row=row, column=13).value = item.get("airline", "")
@@ -257,7 +257,7 @@ def extracted_flightdata_to_excel(ws, data):
                         price = float(item["prijs"])
                         cell = ws.cell(row=row, column=11, value=price)
                         cell.number_format = "#,##0.00"
-                    except ValueError:
+                    except (ValueError, KeyError):
                         ws.cell(row=row, column=11).value = item.get("prijs", "")
 
                     ws.cell(row=row, column=12).value = item.get("PNR", "")
@@ -311,7 +311,17 @@ def write_json_to_excel(data, excel_path, map):
             refunds += [item]
 
     wb = load_workbook(excel_path)
-    ws = wb.create_sheet(title=f"{datetime.now().strftime('%m-%d _ %H-%M')}")
+    prefix_map = {
+        "INBOX/Dossiers/0 Excel NL": "NL",
+        "INBOX/Dossiers/0 Excel BE": "BE",
+        "INBOX/Dossiers/0 Inv DE": "DE",
+        "INBOX/Dossiers/0 Inv FR": "FR",
+        "INBOX/Dossiers/0 Inv Nightliner": "Nightliner"
+    }
+    prefix = prefix_map.get(map, "")
+    timestamp = datetime.now().strftime('%d-%m _ %H-%M')
+    title = f"{prefix} - {timestamp}" if prefix else timestamp
+    ws = wb.create_sheet(title=title)
 
     ws.cell(row=1, column=1).value = "Boekingsdatum"
     ws.cell(row=1, column=2).value = "Datum"
@@ -339,7 +349,7 @@ def write_json_to_excel(data, excel_path, map):
         ws.cell(row=row + 1, column=1).value = "Trein/bus"
         ws.cell(row=row + 1, column=1).fill = highlight
         ws.cell(row=row + 1, column=1).font = Font(bold=True)
-        row = extracted_data_to_excel(ws, trains)
+        row = extracted_flightdata_to_excel(ws, trains)
 
     if len(hotels) != 0:
         ws.cell(row=row + 1, column=1).value = "Hotels"
@@ -376,11 +386,15 @@ def main(service, date, map, excel):
         json_string = extract_flight_data(m)
         print(json_string)
         try:
+            finish_label.configure(text="", text_color="red")
             item = json.loads(json_string)
             json_items += item
             if not isinstance(item, list):
                 print("⚠️ Verwacht list, kreeg:", type(item), item, " mail nummer: " ,number_of_handled_mails + 1)
                 continue
+
+
+
         except json.JSONDecodeError as e:
             finish_label.configure(text="AI geeft onleesbare vorm terug", text_color="red")
             print("JSON kon niet gelezen worden:", e)
