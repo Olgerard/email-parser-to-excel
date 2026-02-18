@@ -3,11 +3,10 @@ import os
 import sys
 import tempfile
 
-from bokeh.layouts import column
+from openai import OpenAI
 from openpyxl.styles import Font, PatternFill
 from datetime import datetime
 from PyPDF2 import PdfReader
-from anthropic import Anthropic
 import json
 from openpyxl import load_workbook
 from dotenv import load_dotenv
@@ -28,11 +27,10 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 load_dotenv()
 
-client = Anthropic(api_key=os.getenv("claude_api_key"))
-
-if not client:
-    print("❌ Vul eerst je .env bestand in!")
-    quit()
+client = OpenAI(
+    api_key="sk-049f1a3a03ad4f3391d8e7ea999338f2",
+    base_url="https://api.deepseek.com"
+)
 
 def email_to_text_gmail(service, date, label):
     query = f'after:{datetime.strptime(date, "%d-%b-%Y").strftime("%Y/%m/%d")}'
@@ -92,17 +90,12 @@ def email_to_text_gmail(service, date, label):
     return extracted_mails
 
 def extract_flight_data(email_text):
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=8000,
-        temperature=0,
-        messages=[
-            {"role": "user", "content": f"""Analyseer deze email (bijlagen starten met 'Text from PDF:') en extraheer reis-/boekingsgegevens als JSON.
+    prompt = f"""Analyseer deze email (bijlagen starten met 'Text from PDF:') en extraheer reis-/boekingsgegevens als JSON.
     
     Formatten per type:
     
     [{{
-        "type": "vlucht of trein/bus",
+        "type": "vlucht of trein/bus (1 van de twee)",
         "boekingsdatum": "dd/mm/jjjj (meestal de datum waarop de mail gestuurd is)",
         "datums": [
             {{"datum": "dd/mm/jjjj (datum heenreis)"}},
@@ -160,7 +153,7 @@ def extract_flight_data(email_text):
     - Alleen stadsnaam, geen luchthavennaam
     
     **Vluchten:**
-    - Tussenstops samenvoegen: Amsterdam - Warschau - Wroclaw → Amsterdam - Wroclaw
+    - Tussenstops samenvoegen: Amsterdam - Warschau - Wroclaw → Amsterdam - Wroclaw (Meer vluchten dan datums is dus onmogelijk)
     
     **Maatschappijen:**
     - Verkort: "LOT Airlines" → "LOT", "KLM Airlines" → "KLM", "TAP Air Portugal" → "TAP", "Expedia TAAP" → "Expedia", "Booking.com" → "Booking"
@@ -189,10 +182,28 @@ def extract_flight_data(email_text):
     \"\"\"
     {email_text}
     \"\"\"
-    """}
-        ]
-    )
-    return response.content[0].text
+    """
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat", # Dit is DeepSeek-V3
+            messages=[
+                {"role": "system", "content": "Je bent een expert in data-extractie. Je antwoordt ALTIJD in pure JSON-indeling."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={
+                'type': 'json_object'
+            },
+            temperature=1,
+            max_tokens=4000
+        )
+
+        # De output van DeepSeek
+        result = response.choices[0].message.content
+        return result
+
+    except Exception as e:
+        print(f"Er is een fout opgetreden: {e}")
+        return None
 
 def extracted_data_to_excel(ws, row, item):
     passagiers = item.get("passagiers", [])
