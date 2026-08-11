@@ -5,6 +5,7 @@ import tempfile
 import email.utils
 import pdfplumber
 from datetime import datetime
+import html2text
 from tkcalendar import DateEntry
 import tkinter.font as tkFont
 import tkinter
@@ -72,6 +73,19 @@ def open_connection(verbose=False):
     connection.authenticate("XOAUTH2", lambda x: auth_string.encode())
     return connection
 
+def clean_text(msg):
+    msg = re.sub(r'\n\s*\n+', '\n', msg) #1 enter in plaats van meerdere
+    msg = re.sub(r'[ \t]+', ' ', msg) #spatie voor tab
+    return msg.strip()
+
+def html_to_text(html):
+    converter = html2text.HTML2Text()
+    converter.ignore_links = True
+    converter.ignore_images = True
+    converter.body_width = 0
+    return converter.handle(html)
+
+
 def email_to_text(msg):
     date_tuple = email.utils.parsedate_tz(msg.get("Date"))
     if date_tuple:
@@ -91,6 +105,12 @@ def email_to_text(msg):
                 charset = part.get_content_charset() or "utf-8"
                 complete_mail += payload.decode(charset, errors="ignore")
 
+        elif content_type == "text/html" and "attachment" not in content_disposition:
+            payload = part.get_payload(decode=True)
+            if payload:
+                charset = part.get_content_charset() or "utf-8"
+                html_fallback = html_to_text(payload.decode(charset, errors="ignore"))
+
         elif content_type == "application/pdf":
             payload = part.get_payload(decode=True)
             if payload:
@@ -103,8 +123,7 @@ def email_to_text(msg):
                     complete_mail += "Text from PDF:" + pdf_text
                 finally:
                     os.remove(tmp_filepath)
-
-    return complete_mail
+    return clean_text(complete_mail)
 
 # Fetch emails and turn into strings
 def get_all_email_data(conn, map_name, since_date):
@@ -131,7 +150,14 @@ def start(date_entry, map_var, excel_path, conn):
     date_str = date_entry.get_date().strftime("%d-%b-%Y")
     map_name = map_var.get()
     excel_file = excel_path.get()
-    print(get_all_email_data(conn, map_name, date_str))
+    mails = get_all_email_data(conn, map_name, date_str)
+    print(len(mails), " mails gevonden")
+
+    #with open("test_mails_output.txt", "w", encoding="utf-8") as f:
+    #    for i, mail in enumerate(mails, start=1):
+    #        f.write(f"\n{'=' * 60}\nMail {i}/{len(mails)} (lengte: {len(mail)} tekens)\n{'=' * 60}\n")
+    #        f.write(mail + "\n")
+    #print(f"{len(mails)} mails weggeschreven naar test_mails_output.txt")
 
 
 def logout(conn, app):
