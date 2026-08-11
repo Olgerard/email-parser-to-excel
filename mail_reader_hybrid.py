@@ -1,13 +1,19 @@
+import email
+import sys
 from imaplib import IMAP4_SSL
+import tempfile
+import email.utils
+import pdfplumber
+from datetime import datetime
 from tkcalendar import DateEntry
 import tkinter.font as tkFont
 import tkinter
 from tkinter import ttk, filedialog
 import customtkinter
 import os
-import imaplib
 import msal
 from dotenv import load_dotenv
+import re
 
 # Outlook login data
 load_dotenv()
@@ -66,20 +72,71 @@ def open_connection(verbose=False):
     connection.authenticate("XOAUTH2", lambda x: auth_string.encode())
     return connection
 
-# Fetch emails
-def emai_to_text():
-    print("email")
+def email_to_text(msg):
+    date_tuple = email.utils.parsedate_tz(msg.get("Date"))
+    if date_tuple:
+        mail_date = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple)).strftime("%d-%m-%Y")
+    else:
+        mail_date = ""
+    complete_mail = f"Verzendatum: {mail_date} - "
+    parts = msg.walk() if msg.is_multipart() else [msg]
+
+    for part in parts:
+        content_type = part.get_content_type()
+        content_disposition = str(part.get("Content-Disposition", ""))
+
+        if content_type == "text/plain" and "attachment" not in content_disposition:
+            payload = part.get_payload(decode=True)
+            if payload:
+                charset = part.get_content_charset() or "utf-8"
+                complete_mail += payload.decode(charset, errors="ignore")
+
+        elif content_type == "application/pdf":
+            payload = part.get_payload(decode=True)
+            if payload:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                    tmp_file.write(payload)
+                    tmp_filepath = tmp_file.name
+                try:
+                    with pdfplumber.open(tmp_filepath) as pdf:
+                        pdf_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+                    complete_mail += "Text from PDF:" + pdf_text
+                finally:
+                    os.remove(tmp_filepath)
+
+    return complete_mail
+
+# Fetch emails and turn into strings
+def get_all_email_data(conn, map_name, since_date):
+    print("Map zoeken met naam: ", map_name)
+    status, _ = conn.select(f'"{map_name}"')
+    if status != "OK":
+        raise ValueError(f"Kon map niet openen: {map_name}")
+    criterium = f'(SINCE "{since_date}")'
+    status, data = conn.search(None, criterium)
+    if status != "OK":
+        raise RuntimeError(f"Kon mails niet ophalen met startdatum:  {since_date}")
+    mail_ids  = data[0].split()
+
+    messages= []
+    for mail_id in mail_ids :
+        status, msg_data = conn.fetch(mail_id, "(RFC822)")
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+        messages.append(email_to_text(msg))
+    return messages
 
 # Starting mail extraction
-def start(date_entry, map_var, excel_path):
+def start(date_entry, map_var, excel_path, conn):
     date_str = date_entry.get_date().strftime("%d-%b-%Y")
     map_name = map_var.get()
     excel_file = excel_path.get()
-    print(date_str, map_name, excel_file)
-    emai_to_text()
+    print(get_all_email_data(conn, map_name, date_str))
 
-def logout():
-    print("logout")
+
+def logout(conn, app):
+    conn.logout()
+    sys.exit()
 
 # Browsing files to select Excel file
 def browse_file(excel_path, file_label, run_btn):
@@ -95,10 +152,21 @@ def browse_file(excel_path, file_label, run_btn):
 def get_mailboxes(conn):
     status, mailboxes = conn.list()
     if status == "OK":
-        return [mailbox.decode() for mailbox in mailboxes]
+        unparsed_names =  [mailbox.decode() for mailbox in mailboxes]
+        parsed_names = []
+        for unparsed_name in unparsed_names:
+            match = re.match(r'\((?P<flags>.*?)\) "(?P<delimiter>.*)" (?P<name>.*)', unparsed_name)
+            if not match:
+                parsed_names += [unparsed_name]
+            else:
+                name = match.group("name").strip()
+                if name.startswith('"') and name.endswith('"'):
+                    name = name[1:-1]
+                parsed_names += [name]
+        return parsed_names
     return []
 
-def build_ui(mailboxes):
+def build_ui(mailboxes, conn):
     # System setting
     customtkinter.set_appearance_mode("System")
     customtkinter.set_default_color_theme("blue")
@@ -135,7 +203,7 @@ def build_ui(mailboxes):
     cb.bind("<KeyRelease>", filter_mailboxes)
     excel_path = tkinter.StringVar()
     file_label = customtkinter.CTkLabel(app, text="Geen bestand geselecteerd", text_color="red")
-    run_btn = customtkinter.CTkButton(app, text="Start", command=lambda: start(date_entry, map, excel_path))
+    run_btn = customtkinter.CTkButton(app, text="Start", command=lambda: start(date_entry, map, excel_path, conn))
     browse_btn = customtkinter.CTkButton(app, text="Kies Excel-bestand", command=lambda: browse_file(excel_path, file_label, run_btn))
     browse_btn.pack(pady=(20,0))
     file_label.pack()
@@ -143,7 +211,7 @@ def build_ui(mailboxes):
     run_btn.pack(pady=(20,10))
     run_btn.configure(state=tkinter.DISABLED)
 
-    logout_btn = customtkinter.CTkButton(app, text="Log uit", command=logout)
+    logout_btn = customtkinter.CTkButton(app, text="Log uit", command=lambda: logout(conn, app))
     logout_btn.pack(pady=(20,10))
 
     finish_label = customtkinter.CTkLabel(app, text = "")
@@ -157,7 +225,7 @@ def build_ui(mailboxes):
 def main():
     conn = open_connection(False)
     mailboxes = get_mailboxes(conn)
-    app = build_ui(mailboxes)
+    app = build_ui(mailboxes, conn)
     app.mainloop()
 
 if __name__ == "__main__":
