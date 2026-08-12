@@ -21,13 +21,82 @@ from openpyxl.styles import numbers
 from openpyxl.styles import Font, PatternFill
 import base64
 import webbrowser
-
+import anthropic
 # Outlook login data
 load_dotenv()
 CLIENT_ID = os.getenv("APPLICATION_ID")
 USERNAME = os.getenv("OUTLOOK_USER")
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token_cache.bin")
 SCOPES = ["Mail.Read"]
+EXTRACTION_SCHEMA = {
+    "type": "array",
+    "items": {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["vlucht", "trein/bus"]},
+                    "boekingsdatum": {"type": "string"},
+                    "datums": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"datum": {"type": "string"}},
+                            "required": ["datum"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "passagiers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"naam": {"type": "string"}},
+                            "required": ["naam"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "bestemming": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"vlucht": {"type": "string"}},
+                            "required": ["vlucht"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "prijs": {"type": "string"},
+                    "PNR": {"type": "string"},
+                    "airline": {"type": "string"}
+                },
+                "required": ["type", "boekingsdatum", "datums", "passagiers", "bestemming", "prijs", "PNR", "airline"],
+                "additionalProperties": False
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["hotel", "refund"]},
+                    "boekingsdatum": {"type": "string"},
+                    "datum": {"type": "string"},
+                    "passagiers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"naam": {"type": "string"}},
+                            "required": ["naam"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "bestemming": {"type": "string"},
+                    "prijs": {"type": "string"},
+                    "PNR": {"type": "string"},
+                    "airline": {"type": "string"}
+                },
+                "required": ["type", "boekingsdatum", "datum", "passagiers", "bestemming", "prijs", "PNR", "airline"],
+                "additionalProperties": False
+            }
+        ]
+    }
+}
 
 client = Anthropic(api_key=os.getenv("claude_api_key"))
 
@@ -199,115 +268,77 @@ def initialize_excel_sheet(excel_path, map_name):
     return title
 
 def build_prompt(email_text):
-    return f"""Analyseer deze email (bijlagen starten met 'Text from PDF:') en extraheer reis-/boekingsgegevens als JSON.
-    
-    Formatten per type:
-    
-    [{{
-        "type": "vlucht of trein/bus",
-        "boekingsdatum": "dd/mm/jjjj (meestal de datum waarop de mail gestuurd is)",
-        "datums": [
-            {{"datum": "dd/mm/jjjj (datum heenreis)"}},
-            {{"datum": "dd/mm/jjjj (datum terugreis, indien aanwezig)"}}
-        ],
-        "passagiers": [
-            {{"naam": "voornaam achternaam"}}
-        ],
-        "bestemming": [
-            {{"vlucht": "Stad van vertrek - Stad van aankomst"}},
-            {{"vlucht": "Terugvlucht (indien aanwezig)"}}
-        ],
-        "prijs": "totale eindprijs (bijv. 123.45)",
-        "PNR": "boekingscode",
-        "airline": "naam van de luchtvaartmaatschappij"
-    }}]
-    
-    Hotels, als het leeg is moet het op dezelfde manier als bij vluchten:
-    [
-    {{
-        "type": "hotel",
-        "boekingsdatum": "",
-        "datum": "Incheck datum (dd/mm) - uitcheck datum (dd/mm)",
-        "passagiers": [
-            {{"naam": "voornaam achternaam"}}
-        ],
-        "bestemming": "Naam hotel, Stad",
-        "prijs": "",
-        "PNR": "",
-        "airline": ""
-    }}]
-    
-    Deze vorm voor refunds, als het leeg is moet het op dezelfde manier als bij vluchten:
-    [{{
-        "type": "refund",
-        "boekingsdatum": "dd/mm/jjjj",
-        "datum": "dd/mm/jjjj",
-        "passagiers": [
-            {{"naam": "voornaam achternaam"}}
-        ],
-        "bestemming": "Enkel heenvlucht (vb Brussel - Amsterdam)",
-        "prijs": vb -123.45",
-        "PNR": "",
-        "airline": ""
-    }}]
-    
-    Regels:
-    **Namen & Titels:**
-    - Verwijder titels: Mr, Mrs, Ms → niet in naam
-    - Format: "Voornaam Achternaam" (hoofdletters aan begin, NOOIT drukletters)
-    - LOT format "ACHTERNAAM VOORNAAM Mr" → draai om naar "Voornaam Achternaam"
-    
-    **Plaatsnamen:**
-    - Altijd Nederlands en voluit (vertaal indien nodig)
-    - Alleen stadsnaam, geen luchthavennaam
-    
-    **Vluchten:**
-    - Tussenstops samenvoegen: Amsterdam - Warschau - Wroclaw → Amsterdam - Wroclaw
-    
-    **Maatschappijen:**
-    - Verkort: "LOT Airlines" → "LOT", "KLM Airlines" → "KLM", "TAP Air Portugal" → "TAP", "Expedia TAAP" → "Expedia", "Booking.com" → "Booking"
-    - Altijd hoofdletter eerste letter
-    - NMBS: PNR = DNR van ticket
-    
-    **Prijzen:**
-    - Euro: alleen cijfer (123.45)
-    - Andere valuta: cijfer + code (179.99 PLN)
-    - Expedia: neem bedrag bij "Betaald aan Expedia", anders hoogste bedrag
-    
-    **Hotels:**
-    - Passagier ontbreekt EN "Company" of "Pieter Smit" staat vermeld → passagier: "Company of Pieter Smit [BE/NL] [aantal]x"
-    -Naam bij expedia het bedrag waar bij staat betaald aan expedia (dit is niet altijd het hoogste bedrag)
-    
-    **Refunds (KLM):**
-    - Vaak alleen: boekingsdatum, PNR, mogelijk naam
-    - Rest velden leeg laten
-    
-    **Lege velden:**
-    - Leeg string "", NOOIT "N/A" of null
-    
-    **Type veld:**
-    - Waarde is EXACT "vlucht" of "trein/bus" — nooit de combinatie "vlucht of trein/bus", nooit iets anders. Kies het type dat overeenkomt met déze specifieke mail.
-    
-    **Output:**
-    - Antwoord met NIETS anders dan de JSON array zelf. Geen uitleg, geen analyse, geen "Ik zie dat...", geen samenvatting van wat je wel of niet gevonden hebt — ook niet als een mail weinig of geen bruikbare informatie bevat.
-    - Als velden niet in te vullen zijn: laat ze gewoon leeg ("") en geef nog steeds enkel de JSON array terug, zonder toelichting.
-    - Geen ```json tags, geen tekst vóór of na de JSON (dit doet het hele programma crashen en is extreem belangrijk!!!)
-    - Het allereerste teken van je antwoord moet '[' zijn.
-    EMAIL:
-    \"\"\"
-    {email_text}
-    \"\"\"
-    """
+    return f"""Analyseer deze email (bijlagen starten met 'Text from PDF:') en extraheer reis-/boekingsgegevens volgens het schema.
+
+Kies "type" op basis van de inhoud: "vlucht" of "trein/bus" voor reistickets, "hotel" voor accommodatie, "refund" voor terugbetalingen.
+
+Veldbetekenis per type:
+
+**Vlucht / trein-bus:**
+- boekingsdatum: meestal de datum waarop de mail verzonden is
+- datums: één entry per richting, eerst heenreis dan terugreis (indien aanwezig)
+- bestemming: één entry per richting — "Stad van vertrek - Stad van aankomst"
+- prijs: totale eindprijs
+- PNR: boekingscode
+- airline: naam van de maatschappij
+
+**Hotel:**
+- boekingsdatum: leeg laten
+- datum: "Incheck datum (dd/mm) - uitcheck datum (dd/mm)"
+- bestemming: "Naam hotel, Stad"
+- prijs, PNR, airline: leeg laten
+
+**Refund:**
+- boekingsdatum, datum: dd/mm/jjjj
+- bestemming: enkel de heenvlucht (bijv. "Brussel - Amsterdam")
+- prijs: negatief bedrag (bijv. -123.45)
+- PNR, airline: vaak leeg — KLM-refundmails bevatten meestal enkel boekingsdatum, PNR en mogelijk een naam
+
+Regels:
+**Namen & Titels:**
+- Verwijder titels: Mr, Mrs, Ms → niet in naam
+- Format: "Voornaam Achternaam" (hoofdletters aan begin, NOOIT drukletters)
+- LOT format "ACHTERNAAM VOORNAAM Mr" → draai om naar "Voornaam Achternaam"
+
+**Plaatsnamen:**
+- Altijd Nederlands en voluit (vertaal indien nodig)
+- Alleen stadsnaam, geen luchthavennaam
+
+**Vluchten:**
+- Tussenstops samenvoegen: Amsterdam - Warschau - Wroclaw → Amsterdam - Wroclaw
+
+**Maatschappijen:**
+- Verkort: "LOT Airlines" → "LOT", "KLM Airlines" → "KLM", "TAP Air Portugal" → "TAP", "Expedia TAAP" → "Expedia", "Booking.com" → "Booking"
+- Altijd hoofdletter eerste letter
+- NMBS: PNR = DNR van ticket
+
+**Prijzen:**
+- Euro: alleen cijfer (123.45)
+- Andere valuta: cijfer + code (179.99 PLN)
+- Expedia: neem bedrag bij "Betaald aan Expedia", anders hoogste bedrag
+
+**Hotels:**
+- Passagier ontbreekt EN "Company" of "Pieter Smit" staat vermeld → passagier: "Company of Pieter Smit [BE/NL] [aantal]x"
+- Naam bij Expedia: het bedrag waarbij staat "betaald aan Expedia" (dit is niet altijd het hoogste bedrag)
+
+**Lege velden:**
+- Leeg string "", NOOIT "N/A" of null
+
+EMAIL:
+\"\"\"
+{email_text}
+\"\"\"
+"""
 
 
 def extract_flight_data(email_text):
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=8000,
-        temperature=0,
+        output_config={"format": {"type": "json_schema","schema": EXTRACTION_SCHEMA}},
         messages=[{"role": "user", "content": build_prompt(email_text)}]
     )
-    return response.content[0].text
+    return next(b.text for b in response.content if b.type == "text")
 
 def estimate_api_cost(mails):
     input_price_per_mtok = 3.00
@@ -316,8 +347,16 @@ def estimate_api_cost(mails):
     total_input_tokens = 0
     for m in mails:
         count = client.messages.count_tokens(
-            model="claude-sonnet-4-6",
-            messages=[{"role": "user", "content": build_prompt(m)}],
+            model="claude-sonnet-5",
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": EXTRACTION_SCHEMA
+                }
+            },
+            messages=[
+                {"role": "user", "content": build_prompt(m)}
+            ]
         )
         total_input_tokens += count.input_tokens
 
