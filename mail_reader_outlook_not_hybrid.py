@@ -1,13 +1,11 @@
-import email
 import json
 import sys
-from imaplib import IMAP4_SSL
 import tempfile
-import email.utils
 import pdfplumber
 from datetime import datetime
 import html2text
 from anthropic import Anthropic
+from sphinx.util import requests
 from tkcalendar import DateEntry
 import tkinter.font as tkFont
 import tkinter
@@ -20,13 +18,14 @@ import re
 from openpyxl import load_workbook
 from openpyxl.styles import numbers
 from openpyxl.styles import Font, PatternFill
+import base64
 
 # Outlook login data
 load_dotenv()
 CLIENT_ID = os.getenv("APPLICATION_ID")
 USERNAME = os.getenv("OUTLOOK_USER")
 CACHE_FILE = "token_cache.bin"
-SCOPES = ["https://outlook.office.com/IMAP.AccessAsUser.All"]
+SCOPES = ["Mail.Read"]
 
 client = Anthropic(api_key=os.getenv("claude_api_key"))
 
@@ -70,15 +69,9 @@ def get_token(verbose=False):
 
     return result["access_token"]
 
-
-# Connecting with mail server
-def open_connection(verbose=False):
-    token = get_token(verbose)
-    if verbose: print(f"Connecting to Outlook as {USERNAME}")
-    connection = IMAP4_SSL("outlook.office365.com")
-    auth_string = f"user={USERNAME}\1auth=Bearer {token}\1\1"
-    connection.authenticate("XOAUTH2", lambda x: auth_string.encode())
-    return connection
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+def graph_headers(token):
+    return {"Authorization": f"Bearer {token}"}
 
 def clean_text(msg):
     msg = re.sub(r'\n\s*\n+', '\n', msg) #1 enter in plaats van meerdere
@@ -92,79 +85,74 @@ def html_to_text(html):
     converter.body_width = 0
     return converter.handle(html)
 
+def get_pdf_attachments_text(token, message_id):
+    headers = graph_headers(token)
+    url = f"{GRAPH_BASE}/me/messages/{message_id}/attachments"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
 
-def email_to_text(msg):
-    date_tuple = email.utils.parsedate_tz(msg.get("Date"))
-    if date_tuple:
-        mail_date = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple)).strftime("%d-%m-%Y")
-    else:
-        mail_date = ""
-    complete_mail = f"Verzendatum: {mail_date} - "
+    text = ""
+    for attachment in response.json().get("value", []):
+        if attachment.get("contentType") == "application/pdf" and "contentBytes" in attachment:
+            pdf_bytes = base64.b64decode(attachment["contentBytes"])
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(pdf_bytes)
+                tmp_filepath = tmp_file.name
+            try:
+                with pdfplumber.open(tmp_filepath) as pdf:
+                    pdf_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+                text += "Text from PDF:" + pdf_text
+            finally:
+                os.remove(tmp_filepath)
+    return text
 
-    plain_text_found = False
-    html_fallback = None
+def message_to_text(token, message):
+    received = message.get("receivedDateTime", "")
+    mail_date = ""
+    if received:
+        mail_date = datetime.fromisoformat(received.replace("Z", "+00:00")).strftime("%d-%m-%Y")
 
-    parts = msg.walk() if msg.is_multipart() else [msg]
+    body = message.get("body", {})
+    content = body.get("content", "")
+    body_text = html_to_text(content) if body.get("contentType") == "html" else content
 
-    for part in parts:
-        content_type = part.get_content_type()
-        content_disposition = str(part.get("Content-Disposition", ""))
+    complete_mail = f"Verzenddatum: {mail_date} - {body_text}"
 
-        if content_type == "text/plain" and "attachment" not in content_disposition:
-            payload = part.get_payload(decode=True)
-            if payload:
-                charset = part.get_content_charset() or "utf-8"
-                complete_mail += payload.decode(charset, errors="ignore")
-                plain_text_found = True
-
-        elif content_type == "text/html" and "attachment" not in content_disposition:
-            payload = part.get_payload(decode=True)
-            if payload:
-                charset = part.get_content_charset() or "utf-8"
-                html_fallback = html_to_text(payload.decode(charset, errors="ignore"))
-
-        elif content_type == "application/pdf":
-            payload = part.get_payload(decode=True)
-            if payload:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                    tmp_file.write(payload)
-                    tmp_filepath = tmp_file.name
-                try:
-                    with pdfplumber.open(tmp_filepath) as pdf:
-                        pdf_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-                    complete_mail += "Text from PDF:" + pdf_text
-                finally:
-                    os.remove(tmp_filepath)
-
-    if not plain_text_found and html_fallback:
-        complete_mail += html_fallback
+    if message.get("hasAttachments"):
+        complete_mail += get_pdf_attachments_text(token, message["id"])
 
     return clean_text(complete_mail)
 
 # Fetch emails and turn into strings
-def get_all_email_data(conn, map_name, since_date):
-    print("Map zoeken met naam: ", map_name)
-    status, _ = conn.select(f'"{map_name}"')
-    if status != "OK":
-        raise ValueError(f"Kon map niet openen: {map_name}")
-    criterium = f'(SINCE "{since_date}")'
-    status, data = conn.search(None, criterium)
-    if status != "OK":
-        raise RuntimeError(f"Kon mails niet ophalen met startdatum:  {since_date}")
-    mail_ids  = data[0].split()
+def get_all_email_data(token, folder_id, since_date_iso):
+    headers = graph_headers(token)
+    url = (f"{GRAPH_BASE}/me/mailFolders/{folder_id}/messages"
+           f"?$filter=receivedDateTime ge {since_date_iso}"
+           f"&$select=id,receivedDateTime,body,hasAttachments"
+           f"&$top=50&$orderby=receivedDateTime asc")
 
-    messages= []
-    for mail_id in mail_ids :
-        status, msg_data = conn.fetch(mail_id, "(RFC822)")
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-        messages.append(email_to_text(msg))
-    return messages
+    messages_text = []
+    while url:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        for message in data.get("value", []):
+            messages_text.append(message_to_text(token, message))
+        url = data.get("@odata.nextLink")
+    return messages_text
 
 def initialize_excel_sheet(excel_path, map):
     wb = load_workbook(excel_path)
+    prefix_map = {
+        "Postvak IN/1 Pieter Smit/Inv NL": "NL",
+        "Postvak IN/1 Pieter Smit/Inv BE": "BE",
+        "Postvak IN/1 Pieter Smit/Inv DE": "DE",
+        "Postvak IN/1 Pieter Smit/Inv FR": "FR",
+        "Postvak IN/1 Pieter Smit/Inv Nightliner": "Nightliner"
+    }
+    prefix = prefix_map.get(map, "")
     timestamp = datetime.now().strftime('%d-%m _ %H-%M')
-    title = f"{map} - {timestamp}"
+    title = f"{prefix} - {timestamp}" if prefix else timestamp
     ws = wb.create_sheet(title=title)
 
     ws.cell(row=1, column=1).value = "Boekingsdatum"
@@ -461,11 +449,15 @@ def format_excel_cells(ws):
             cell.number_format = "#,##0.00"
 
 # Starting mail extraction
-def start(date_entry, map_var, excel_path, conn):
-    date_str = date_entry.get_date().strftime("%d-%b-%Y")
+def start(date_entry, map_var, excel_path, token, mailbox_lookup):
+    since_date_iso = date_entry.get_date().strftime("%Y-%m-%dT00:00:00Z")
     map_name = map_var.get()
     excel_file = excel_path.get()
-    mails = get_all_email_data(conn, map_name, date_str)
+    folder_id = mailbox_lookup.get(map_name)
+    if not folder_id:
+        print(f"Map '{map_name}' niet gevonden")
+        return
+    mails = get_all_email_data(token, folder_id, since_date_iso)
     amount_mails = len(mails)
     print(amount_mails, " mails gevonden")
 
@@ -515,8 +507,7 @@ def start(date_entry, map_var, excel_path, conn):
             continue
     print(f'{number_of_handled_mails} van de {amount_mails} verwerkt en in Excel gezet')
 
-def logout(conn, app):
-    conn.logout()
+def logout(app):
     if os.path.exists("token_cache.bin"):
         os.remove("token_cache.bin")
     app.destroy()
@@ -533,24 +524,26 @@ def browse_file(excel_path, file_label, run_btn):
         file_label.configure(text=f"Geselecteerd: {os.path.basename(filepath)}", text_color="green")
         run_btn.configure(state=tkinter.NORMAL)
 
-def get_mailboxes(conn):
-    status, mailboxes = conn.list()
-    if status == "OK":
-        unparsed_names =  [mailbox.decode() for mailbox in mailboxes]
-        parsed_names = []
-        for unparsed_name in unparsed_names:
-            match = re.match(r'\((?P<flags>.*?)\) "(?P<delimiter>.*)" (?P<name>.*)', unparsed_name)
-            if not match:
-                parsed_names += [unparsed_name]
-            else:
-                name = match.group("name").strip()
-                if name.startswith('"') and name.endswith('"'):
-                    name = name[1:-1]
-                parsed_names += [name]
-        return parsed_names
-    return []
+def get_mailboxes(token, parent_id=None, parent_path=""):
+    headers = graph_headers(token)
+    url = (f"{GRAPH_BASE}/me/mailFolders/{parent_id}/childFolders?$top=100" if parent_id else f"{GRAPH_BASE}/me/mailFolders?$top=100")
+    folders = []
+    while url:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        for folder in data.get("value", []):
+            full_path = f"{parent_path}/{folder['displayName']}" if parent_path else folder["displayName"]
+            folders.append({"path": full_path, "id": folder["id"]})
+            if folder.get("childFolderCount", 0) > 0:
+                folders.extend(get_mailboxes(token, folder["id"], full_path))
+        url = data.get("@odata.nextLink")
+    return folders
 
-def build_ui(mailboxes, conn):
+def build_ui(mailboxes, token):
+    mailbox_paths = [m["path"] for m in mailboxes]
+    mailbox_lookup = {m["path"]: m["id"] for m in mailboxes}
+
     # System setting
     customtkinter.set_appearance_mode("System")
     customtkinter.set_default_color_theme("blue")
@@ -564,7 +557,6 @@ def build_ui(mailboxes, conn):
     date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail in")
     date_title.pack(pady=(10,0))
 
-    date = tkinter.StringVar()
     date_entry = DateEntry(app, date_pattern='dd/mm/yyyy')
     date_entry.configure(font=tkFont.Font(size=14))
     date_entry.pack(padx=10, pady=(10,20))
@@ -572,22 +564,23 @@ def build_ui(mailboxes, conn):
     map_title = customtkinter.CTkLabel(app, text="Vul de naam van de map in (vb. NL)")
     map_title.pack()
 
-    map = tkinter.StringVar()
-    cb = ttk.Combobox(app, values=mailboxes, textvariable=map, width=25, height=40)
+    map_var = tkinter.StringVar()
+    cb = ttk.Combobox(app, values=mailbox_paths, textvariable=map_var, width=25, height=40)
     cb.configure(font=tkFont.Font(size=14) )
     cb.pack(pady=(0,10))
 
     def filter_mailboxes(event):
-        typed = map.get().lower()
+        typed = map_var.get().lower()
         if typed == "":
-            cb["values"] = mailboxes
+            cb["values"] = mailbox_paths
         else:
-            cb["values"] = [m for m in mailboxes if typed in m.lower()]
+            cb["values"] = [m for m in mailbox_paths if typed in m.lower()]
 
     cb.bind("<KeyRelease>", filter_mailboxes)
+
     excel_path = tkinter.StringVar()
     file_label = customtkinter.CTkLabel(app, text="Geen bestand geselecteerd", text_color="red")
-    run_btn = customtkinter.CTkButton(app, text="Start", command=lambda: start(date_entry, map, excel_path, conn))
+    run_btn = customtkinter.CTkButton(app, text="Start", command=lambda: start(date_entry, map_var, excel_path, token, mailbox_lookup))
     browse_btn = customtkinter.CTkButton(app, text="Kies Excel-bestand", command=lambda: browse_file(excel_path, file_label, run_btn))
     browse_btn.pack(pady=(20,0))
     file_label.pack()
@@ -595,7 +588,7 @@ def build_ui(mailboxes, conn):
     run_btn.pack(pady=(20,10))
     run_btn.configure(state=tkinter.DISABLED)
 
-    logout_btn = customtkinter.CTkButton(app, text="Log uit", command=lambda: logout(conn, app))
+    logout_btn = customtkinter.CTkButton(app, text="Log uit", command=lambda: logout(app))
     logout_btn.pack(pady=(20,10))
 
     finish_label = customtkinter.CTkLabel(app, text = "")
@@ -607,9 +600,9 @@ def build_ui(mailboxes, conn):
     return app
 
 def main():
-    conn = open_connection(False)
-    mailboxes = get_mailboxes(conn)
-    app = build_ui(mailboxes, conn)
+    token = get_token(False)
+    mailboxes = get_mailboxes(token)
+    app = build_ui(mailboxes, token)
     app.mainloop()
 
 if __name__ == "__main__":
