@@ -1,11 +1,12 @@
 import json
 import sys
 import tempfile
+import threading
 import pdfplumber
 from datetime import datetime
 import html2text
 from anthropic import Anthropic
-from sphinx.util import requests
+import requests
 from tkcalendar import DateEntry
 import tkinter.font as tkFont
 import tkinter
@@ -19,18 +20,19 @@ from openpyxl import load_workbook
 from openpyxl.styles import numbers
 from openpyxl.styles import Font, PatternFill
 import base64
+import webbrowser
 
 # Outlook login data
 load_dotenv()
 CLIENT_ID = os.getenv("APPLICATION_ID")
 USERNAME = os.getenv("OUTLOOK_USER")
-CACHE_FILE = "token_cache.bin"
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token_cache.bin")
 SCOPES = ["Mail.Read"]
 
 client = Anthropic(api_key=os.getenv("claude_api_key"))
 
 # Get token to access Outlook mail
-def get_token(verbose=False):
+def get_token(device_flow_callback, verbose=False):
     # Cache to store token
     cache = msal.SerializableTokenCache()
     if os.path.exists(CACHE_FILE):
@@ -53,6 +55,7 @@ def get_token(verbose=False):
             print("Geen geldig token in cache, eenmalige login nodig")
 
         flow = app.initiate_device_flow(scopes=SCOPES)
+        device_flow_callback(flow)
         if "user_code" not in flow:
             raise Exception(f"Device flow mislukt: {flow.get('error')}: {flow.get('error_description', flow)}")
 
@@ -132,6 +135,7 @@ def get_all_email_data(token, folder_id, since_date_iso):
            f"&$top=50&$orderby=receivedDateTime asc")
 
     messages_text = []
+    # Response is in pages -> while loop to request all pages
     while url:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -141,7 +145,7 @@ def get_all_email_data(token, folder_id, since_date_iso):
         url = data.get("@odata.nextLink")
     return messages_text
 
-def initialize_excel_sheet(excel_path, map):
+def initialize_excel_sheet(excel_path, map_name):
     wb = load_workbook(excel_path)
     prefix_map = {
         "Postvak IN/1 Pieter Smit/Inv NL": "NL",
@@ -150,7 +154,7 @@ def initialize_excel_sheet(excel_path, map):
         "Postvak IN/1 Pieter Smit/Inv FR": "FR",
         "Postvak IN/1 Pieter Smit/Inv Nightliner": "Nightliner"
     }
-    prefix = prefix_map.get(map, "")
+    prefix = prefix_map.get(map_name, "")
     timestamp = datetime.now().strftime('%d-%m _ %H-%M')
     title = f"{prefix} - {timestamp}" if prefix else timestamp
     ws = wb.create_sheet(title=title)
@@ -194,13 +198,8 @@ def initialize_excel_sheet(excel_path, map):
     wb.save(excel_path)
     return title
 
-def extract_flight_data(email_text):
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=8000,
-        temperature=0,
-        messages=[
-            {"role": "user", "content": f"""Analyseer deze email (bijlagen starten met 'Text from PDF:') en extraheer reis-/boekingsgegevens als JSON.
+def build_prompt(email_text):
+    return f"""Analyseer deze email (bijlagen starten met 'Text from PDF:') en extraheer reis-/boekingsgegevens als JSON.
     
     Formatten per type:
     
@@ -286,17 +285,47 @@ def extract_flight_data(email_text):
     **Lege velden:**
     - Leeg string "", NOOIT "N/A" of null
     
+    **Type veld:**
+    - Waarde is EXACT "vlucht" of "trein/bus" — nooit de combinatie "vlucht of trein/bus", nooit iets anders. Kies het type dat overeenkomt met déze specifieke mail.
+    
     **Output:**
-    - Alleen pure JSON, geen ```json tags (Dit zorgt ervoor dat heel het programma crasht en is extreem belangrijk!!!), geen tekst eromheen
-    - Exact formaat zoals voorbeelden
+    - Antwoord met NIETS anders dan de JSON array zelf. Geen uitleg, geen analyse, geen "Ik zie dat...", geen samenvatting van wat je wel of niet gevonden hebt — ook niet als een mail weinig of geen bruikbare informatie bevat.
+    - Als velden niet in te vullen zijn: laat ze gewoon leeg ("") en geef nog steeds enkel de JSON array terug, zonder toelichting.
+    - Geen ```json tags, geen tekst vóór of na de JSON (dit doet het hele programma crashen en is extreem belangrijk!!!)
+    - Het allereerste teken van je antwoord moet '[' zijn.
     EMAIL:
     \"\"\"
     {email_text}
     \"\"\"
-    """}
-        ]
+    """
+
+
+def extract_flight_data(email_text):
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=8000,
+        temperature=0,
+        messages=[{"role": "user", "content": build_prompt(email_text)}]
     )
     return response.content[0].text
+
+def estimate_api_cost(mails):
+    input_price_per_mtok = 3.00
+    output_price_per_mtok = 15.00
+    estimated_output_tokens_per_mail = 300  # ruwe schatting, JSON-antwoord is klein
+    total_input_tokens = 0
+    for m in mails:
+        count = client.messages.count_tokens(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": build_prompt(m)}],
+        )
+        total_input_tokens += count.input_tokens
+
+    input_cost = total_input_tokens / 1_000_000 * input_price_per_mtok
+    estimated_output_tokens = len(mails) * estimated_output_tokens_per_mail
+    output_cost = estimated_output_tokens / 1_000_000 * output_price_per_mtok
+
+    return total_input_tokens, input_cost, output_cost
 
 def extracted_flightdata_to_excel(ws, row, item):
     first_destination = True
@@ -396,11 +425,21 @@ def extracted_data_to_excel(ws, row, item):
         current_row += 1
         first_passenger = False
 
+def normalize_ticket_type(ticket_type):
+    t = ticket_type.lower()
+    if "vlucht" in t:
+        return "vlucht"
+    if "trein" in t or "bus" in t:
+        return "trein/bus"
+    if "hotel" in t:
+        return "hotel"
+    return t
+
 def append_item_to_excel(item, excel_path, sheet_name):
     wb = load_workbook(excel_path)
     ws = wb[sheet_name]
 
-    ticket_type = item.get("type","")
+    ticket_type = normalize_ticket_type(item.get("type", ""))
 
     section_names = {
         "vlucht": "Vluchten",
@@ -449,29 +488,31 @@ def format_excel_cells(ws):
             cell.number_format = "#,##0.00"
 
 # Starting mail extraction
-def start(date_entry, map_var, excel_path, token, mailbox_lookup):
+def start(date_entry, map_var, excel_path, token, mailbox_lookup, progress_label):
+    progress_label.configure(text="Begonnen met ophalen van emails", text_color="green")
     since_date_iso = date_entry.get_date().strftime("%Y-%m-%dT00:00:00Z")
     map_name = map_var.get()
     excel_file = excel_path.get()
     folder_id = mailbox_lookup.get(map_name)
     if not folder_id:
         print(f"Map '{map_name}' niet gevonden")
+        progress_label.configure(text="Geen correcte map geselecteerd", text_color="red")
         return
     mails = get_all_email_data(token, folder_id, since_date_iso)
     amount_mails = len(mails)
-    print(amount_mails, " mails gevonden")
 
-    #with open("test_mails_output.txt", "w", encoding="utf-8") as f:
-    #    for i, mail in enumerate(mails, start=1):
-    #        f.write(f"\n{'=' * 60}\nMail {i}/{len(mails)} (lengte: {len(mail)} tekens)\n{'=' * 60}\n")
-    #        f.write(mail + "\n")
-    #print(f"{len(mails)} mails weggeschreven naar test_mails_output.txt")
+    total_input_tokens, input_cost, estimated_output_cost = estimate_api_cost(mails)
+    total_estimate = input_cost + estimated_output_cost
+
+    print(amount_mails, " mails gevonden")
+    progress_label.configure(text=f"{amount_mails} mails gevonden -- Verwacht kost = €{total_estimate}", text_color="green")
 
     # Excel blad maken
     try:
         sheet_name = initialize_excel_sheet(excel_file, map_name)
     except Exception as e:
         print(e)
+        progress_label.configure(text="Excel sheet aanmaken mislukt (mogelijk staat Excel nog open)", text_color="red")
         return
 
     errors = 0
@@ -494,16 +535,19 @@ def start(date_entry, map_var, excel_path, token, mailbox_lookup):
             append_item_to_excel(item, excel_file, sheet_name)
 
             number_of_handled_mails += 1
+            progress_label.configure(text=f"{number_of_handled_mails + errors} van de {amount_mails} verwerkt, {number_of_handled_mails} succesvol, {errors} mislukt", text_color="green")
 
         except json.JSONDecodeError as e:
             print("JSON kon niet gelezen worden:", e)
             print(json_string)
             errors += 1
+            progress_label.configure(text=f"{number_of_handled_mails + errors} van de {amount_mails} verwerkt, {number_of_handled_mails} succesvol, {errors} mislukt", text_color="green")
             continue
 
         except Exception as e:
             print(f"Onverwachte error: {e}")
             errors += 1
+            progress_label.configure(text=f"{number_of_handled_mails + errors} van de {amount_mails} verwerkt, {number_of_handled_mails} succesvol, {errors} mislukt", text_color="green")
             continue
     print(f'{number_of_handled_mails} van de {amount_mails} verwerkt en in Excel gezet')
 
@@ -540,18 +584,13 @@ def get_mailboxes(token, parent_id=None, parent_path=""):
         url = data.get("@odata.nextLink")
     return folders
 
-def build_ui(mailboxes, token):
+def start_main_thread(date_entry, map_var, excel_path, token, mailbox_lookup, progress_label):
+    thread = threading.Thread(target=lambda: start(date_entry, map_var, excel_path, token, mailbox_lookup, progress_label))
+    thread.start()
+
+def build_ui_content(app, mailboxes, token):
     mailbox_paths = [m["path"] for m in mailboxes]
     mailbox_lookup = {m["path"]: m["id"] for m in mailboxes}
-
-    # System setting
-    customtkinter.set_appearance_mode("System")
-    customtkinter.set_default_color_theme("blue")
-
-    # App frame
-    app = customtkinter.CTk()
-    app.geometry("720x480")
-    app.title("Excel assistent")
 
     # UI Elements
     date_title = customtkinter.CTkLabel(app, text="Vul de datum van de eerste mail in")
@@ -580,7 +619,9 @@ def build_ui(mailboxes, token):
 
     excel_path = tkinter.StringVar()
     file_label = customtkinter.CTkLabel(app, text="Geen bestand geselecteerd", text_color="red")
-    run_btn = customtkinter.CTkButton(app, text="Start", command=lambda: start(date_entry, map_var, excel_path, token, mailbox_lookup))
+    progress_label = customtkinter.CTkLabel(app, text = "")
+
+    run_btn = customtkinter.CTkButton(app, text="Start", command=lambda: start_main_thread(date_entry, map_var, excel_path, token, mailbox_lookup, progress_label))
     browse_btn = customtkinter.CTkButton(app, text="Kies Excel-bestand", command=lambda: browse_file(excel_path, file_label, run_btn))
     browse_btn.pack(pady=(20,0))
     file_label.pack()
@@ -594,15 +635,41 @@ def build_ui(mailboxes, token):
     finish_label = customtkinter.CTkLabel(app, text = "")
     finish_label.pack()
 
-    progress_label = customtkinter.CTkLabel(app, text = "")
     progress_label.pack()
 
     return app
 
+def finish_login(app, status_label, mailboxes, token):
+    status_label.destroy()
+    build_ui_content(app, mailboxes, token)
+
 def main():
-    token = get_token(False)
-    mailboxes = get_mailboxes(token)
-    app = build_ui(mailboxes, token)
+    # System setting
+    customtkinter.set_appearance_mode("System")
+    customtkinter.set_default_color_theme("blue")
+    # App frame
+    app = customtkinter.CTk()
+    app.geometry("720x480")
+    app.title("Excel assistent")
+
+    status_label = customtkinter.CTkLabel(app, text="Bezig met inloggen...")
+    status_label.pack(pady=20)
+
+    def device_flow_callback(flow):
+        app.after(0, lambda: status_label.configure(
+            text=f"Ga naar {flow['verification_uri']} en voer code {flow['user_code']} in."
+        ))
+        webbrowser.open(flow["verification_uri"])
+
+    def login_worker():
+        try:
+            token = get_token(device_flow_callback)
+            mailboxes = get_mailboxes(token)
+            app.after(0, lambda: finish_login(app, status_label, mailboxes, token))
+        except Exception as e:
+            app.after(0, lambda: status_label.configure(text=f"Login mislukt: {e}", text_color="red"))
+
+    threading.Thread(target=login_worker, daemon=True).start()
     app.mainloop()
 
 if __name__ == "__main__":
