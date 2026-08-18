@@ -21,7 +21,6 @@ from openpyxl.styles import numbers
 from openpyxl.styles import Font, PatternFill
 import base64
 import webbrowser
-import anthropic
 # Outlook login data
 load_dotenv()
 CLIENT_ID = os.getenv("APPLICATION_ID")
@@ -275,7 +274,7 @@ Kies "type" op basis van de inhoud: "vlucht" of "trein/bus" voor reistickets, "h
 Veldbetekenis per type:
 
 **Vlucht / trein-bus:**
-- boekingsdatum: meestal de datum waarop de mail verzonden is
+- boekingsdatum: meestal de datum waarop de mail verzonden is (dd/mm/jjjj)
 - datums: één entry per richting, eerst heenreis dan terugreis (indien aanwezig)
 - bestemming: één entry per richting — "Stad van vertrek - Stad van aankomst"
 - prijs: totale eindprijs
@@ -283,22 +282,25 @@ Veldbetekenis per type:
 - airline: naam van de maatschappij
 
 **Hotel:**
-- boekingsdatum: leeg laten
+- boekingsdatum: dd/mm/jjjj
 - datum: "Incheck datum (dd/mm) - uitcheck datum (dd/mm)"
 - bestemming: "Naam hotel, Stad"
-- prijs, PNR, airline: leeg laten
+- prijs: totale eindprijs
+- PNR: boekingscode
+- airline: naam van hotelmaatschappij
 
 **Refund:**
 - boekingsdatum, datum: dd/mm/jjjj
 - bestemming: enkel de heenvlucht (bijv. "Brussel - Amsterdam")
 - prijs: negatief bedrag (bijv. -123.45)
-- PNR, airline: vaak leeg — KLM-refundmails bevatten meestal enkel boekingsdatum, PNR en mogelijk een naam
+- PNR: boekingscode (mogelijk leeg bij refund)
 
 Regels:
 **Namen & Titels:**
 - Verwijder titels: Mr, Mrs, Ms → niet in naam
 - Format: "Voornaam Achternaam" (hoofdletters aan begin, NOOIT drukletters)
-- LOT format "ACHTERNAAM VOORNAAM Mr" → draai om naar "Voornaam Achternaam"
+- LOT en TAP format "ACHTERNAAM VOORNAAM Mr" → draai om naar "Voornaam Achternaam"
+- mytrip → niet naam van andere maatschappij zetten
 
 **Plaatsnamen:**
 - Altijd Nederlands en voluit (vertaal indien nodig)
@@ -308,14 +310,15 @@ Regels:
 - Tussenstops samenvoegen: Amsterdam - Warschau - Wroclaw → Amsterdam - Wroclaw
 
 **Maatschappijen:**
-- Verkort: "LOT Airlines" → "LOT", "KLM Airlines" → "KLM", "TAP Air Portugal" → "TAP", "Expedia TAAP" → "Expedia", "Booking.com" → "Booking"
+- Verkort: "LOT Airlines" → "LOT", "KLM Airlines" → "KLM", "TAP Air Portugal" → "TAP", "Expedia TAAP" → "Expedia", "Booking.com" → "Booking", Deutsche Bahn" → "DB"
 - Altijd hoofdletter eerste letter
 - NMBS: PNR = DNR van ticket
 
 **Prijzen:**
 - Euro: alleen cijfer (123.45)
 - Andere valuta: cijfer + code (179.99 PLN)
-- Expedia: neem bedrag bij "Betaald aan Expedia", anders hoogste bedrag
+-Nooit zelf een valuta omrekenen
+- Expedia: neem bedrag bij "Subtotaal betaald aan Expedia of waar Mastercard achter staat", anders hoogste bedrag
 
 **Hotels:**
 - Passagier ontbreekt EN "Company" of "Pieter Smit" staat vermeld → passagier: "Company of Pieter Smit [BE/NL] [aantal]x"
@@ -566,6 +569,7 @@ def start(date_entry, map_var, excel_path, token, mailbox_lookup, progress_label
                     item = parsed[0]
                 else:
                     print("⚠️ Lege lijst ontvangen van AI, email overgeslagen")
+                    print("Mislukte mail: ", m)
                     errors += 1
                     continue
             else:
